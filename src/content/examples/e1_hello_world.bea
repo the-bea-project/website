@@ -1,0 +1,3 @@
+pub def main() {
+  echo "Hello, World!"
+}

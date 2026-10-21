@@ -1,0 +1,58 @@
+pub type Coach {
+  Coach(
+    name: String,
+    former_player: Bool
+    )
+}
+
+pub type Stats {
+  Stats(wins: Int, losses: Int)
+}
+
+pub type Team {
+  Team(name: String, coach: Coach, stats: Stats)   
+}
+
+        
+
+def create_coach(name: String, former_player: Bool) -> Coach {
+  Coach(name:, former_player:)
+}
+
+def create_stats(wins: Int, losses: Int) -> Stats {
+  Stats(wins:, losses:)
+}
+
+def create_team(name: String, coach: Coach, stats: Stats) -> Team {
+  Team(name:, coach:, stats:)
+}
+
+def replace_coach(team: Team, coach: Coach) -> Team {
+  Team(team | coach:)
+}
+
+def is_same_team(home_team: Team, away_team: Team) -> Bool {
+  home_team == away_team
+}
+
+def root_for_team(team: Team) -> Bool {
+  cond {
+    team.coach.name == "Pames Jazo" -> True
+    team.coach.former_player -> True
+    team.name == "Chicago Bulls" -> True
+    _ -> False
+  }
+}
+
+pub def main() {
+  coach1 = create_coach("James Pazo", False)
+  coach2 = create_coach("Pames Jazo", False)
+  stats = create_stats(21, 12)
+  team = create_team("Lapis Panthers", coach1, stats)
+  new_team = replace_coach(team, coach2)
+  echo new_team
+
+  echo is_same_team(team, new_team)
+
+  echo root_for_team(new_team)
+}

@@ -1,0 +1,56 @@
+pub type Player {
+  Player(
+    name:  Option(String),
+    level: Int,
+    health: Int,
+    mana: Option(Int)
+  )
+}
+
+pub def introduce(Player(name: None | _)) {
+  "Mighty Magician"
+}
+
+pub def introduce(Player(name: Some(v) | _)) {
+  v
+}
+
+pub def revive(Player(health: 0, level: l | _) as p) if l >= 10 {
+  Some(Player(p | health: 100, mana: Some(100)))
+}
+
+pub def revive(Player(health: 0 | _) as p) {
+  Some(Player(p | health: 100))
+}
+
+pub def revive(_) {
+  None
+}
+
+pub def cast_spell(Player(mana: None, health: h | _) as p, cost) {
+  updated_health = if h - cost < 0 {
+    0
+  } else {
+    h - cost
+  }
+  
+  (Player(p | health: updated_health), 0)
+}
+
+pub def cast_spell(Player(mana: Some(m) | _) as p, cost) if m < cost {
+  (p, 0)
+}
+
+pub def cast_spell(Player(mana: Some(m) | _) as p, cost) {
+  (Player(p | mana: Some(m - cost)), 2 * cost)
+}
+
+pub def main() {
+  echo introduce(Player(name: None, level: 2, health: 8, mana: None))
+  dead_player = Player(name: None, level: 2, health: 0, mana: None)
+  echo revive(dead_player)
+  alive_player = Player(name: None, level: 2, health: 42, mana: None)
+  echo revive(alive_player)
+  wizard = Player(name: None, level: 18, health: 123, mana: Some(30))
+  echo cast_spell(wizard, 14)
+}

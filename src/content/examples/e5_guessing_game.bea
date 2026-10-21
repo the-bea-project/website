@@ -1,0 +1,39 @@
+def reply_if(guess: Int) -> String {
+  if guess == 42 {
+    return "Correct"
+  }
+
+  if guess == 41 or guess == 43 {
+    return "So close"
+  }
+
+  if guess > 42 {
+    return "Too high"
+  }
+
+  return "Too low"
+}
+
+def reply_cond(guess: Int) -> String {
+  cond {
+    guess == 42 -> "Correct"
+    guess == 41 or guess == 42 -> "So close"
+    guess > 42 -> "Too high"
+    True -> "Too low"
+  }
+}
+
+def reply_case(guess: Int) -> String {
+  case guess {
+    42 -> "Correct"
+    41 | 43 -> "So close"
+    g if g > 42 -> "Too high"
+    _ -> "Too low"
+  }
+}
+
+pub def main() {
+  reply_if(46) |> echo
+  reply_cond(42) |> echo
+  reply_case(21) |>echo
+}

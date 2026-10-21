@@ -1,0 +1,19 @@
+pub type Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+}
+
+pub def area(Circle(r)) { 3.14 *. r *. r }
+pub def area(Rect(w, h)) { w *. h }
+
+pub def describe(shapes: List(Shape)) -> Result(String, String) {
+  if shapes == [] {
+    return Error("no shapes")
+  }
+  total = shapes |> list.map(area) |> float.sum
+  Ok("total area: #{float.to_string(total)}")
+}
+
+pub def main() {
+  describe([Circle(1.0), Rect(2.0, 3.0)]) |> echo
+}

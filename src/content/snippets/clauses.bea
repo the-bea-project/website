@@ -1,0 +1,10 @@
+def fizzbuzz(n: Int) -> String
+
+def fizzbuzz(n) if n % 15 == 0 { "FizzBuzz" }
+def fizzbuzz(n) if n % 3 == 0 { "Fizz" }
+def fizzbuzz(n) if n % 5 == 0 { "Buzz" }
+def fizzbuzz(n) { int.to_string(n) }
+
+pub def main() {
+  [9, 10, 14, 15] |> list.map(fizzbuzz) |> echo
+}

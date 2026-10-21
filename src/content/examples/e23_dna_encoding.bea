@@ -1,0 +1,82 @@
+import gleam/io
+import gleam/list
+import gleam/string
+
+pub type Nucleotide {
+  Adenine
+  Cytosine
+  Guanine
+  Thymine
+}
+
+pub def encode_nucleotide(nucleotide: Nucleotide) -> Int {
+  case nucleotide {
+    Adenine -> 0b00
+    Cytosine -> 0b01
+    Guanine -> 0b10
+    Thymine -> 0b11
+  }
+}
+
+pub def decode_nucleotide(nucleotide: Int) -> Result(Nucleotide, Nil) {
+  case nucleotide {
+    0b00 -> Ok(Adenine)
+    0b01 -> Ok(Cytosine)
+    0b10 -> Ok(Guanine)
+    0b11 -> Ok(Thymine)
+    _ -> Error(Nil)
+  }
+}
+
+pub def encode(dna: List(Nucleotide)) -> BitArray {
+  do_encode(dna, <<>>)
+}
+
+def do_encode(dna: List(Nucleotide), acc: BitArray) -> BitArray
+
+def do_encode([], acc) {
+  acc
+}
+
+def do_encode([nucleotide | rest], acc) {
+  do_encode(rest, <<acc:bits, encode_nucleotide(nucleotide):2>>)
+}
+
+pub def decode(dna: BitArray) -> Result(List(Nucleotide), Nil) {
+  do_decode(dna, [])
+}
+
+def do_decode(<<>>, acc) {
+  Ok(list.reverse(acc))
+}
+
+def do_decode(<<0b00:2, rest:bits>>, acc) {
+  do_decode(rest, [Adenine | acc])
+}
+
+def do_decode(<<0b01:2, rest:bits>>, acc) {
+  do_decode(rest, [Cytosine | acc])
+}
+
+def do_decode(<<0b10:2, rest:bits>>, acc) {
+  do_decode(rest, [Guanine | acc])
+}
+
+def do_decode(<<0b11:2, rest:bits>>, acc) {
+  do_decode(rest, [Thymine | acc])
+}
+
+def do_decode(_, _) {
+  Error(Nil)
+}
+
+pub def main() {
+  dna = [Adenine, Cytosine, Guanine, Thymine, Thymine]
+  bits = encode(dna)
+  io.println(string.inspect(bits))
+  io.println(string.inspect(decode(bits) == Ok(dna)))
+  io.println(string.inspect(decode(<<0b1:1>>)))
+  header = <<"DNA":utf8, 3:size(8), 255:8-big>>
+  <<"DNA":utf8, len:8, rest:bits>> = header
+  io.println(string.inspect(#(len, rest)))
+}

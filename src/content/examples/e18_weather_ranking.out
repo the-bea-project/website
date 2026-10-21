@@ -1,0 +1,6 @@
+src/e18_weather_ranking.bea:44
+54.72222222222222
+src/e18_weather_ranking.bea:45
+Gt
+src/e18_weather_ranking.bea:46
+[City("London", Celsius(30.5)), City("Paris", Fahrenheit(82.1))]

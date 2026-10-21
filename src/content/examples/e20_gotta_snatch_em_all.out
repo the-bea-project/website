@@ -1,0 +1,12 @@
+src/e20_gotta_snatch_em_all.bea:70
+Set(dict.from_list([#("Newthree", [])]))
+src/e20_gotta_snatch_em_all.bea:71
+#(False, Set(dict.from_list([#("Newthree", []), #("Scientuna", [])])))
+src/e20_gotta_snatch_em_all.bea:72
+#(True, Set(dict.from_list([#("Newthree", [])])))
+src/e20_gotta_snatch_em_all.bea:73
+["Scientuna"]
+src/e20_gotta_snatch_em_all.bea:74
+2
+src/e20_gotta_snatch_em_all.bea:75
+Set(dict.from_list([#("Shiny Scientuna", [])]))

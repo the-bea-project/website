@@ -1,0 +1,8 @@
+src/e21_role_playing.bea:49
+"Mighty Magician"
+src/e21_role_playing.bea:51
+Some(Player(None, 2, 100, None))
+src/e21_role_playing.bea:53
+None
+src/e21_role_playing.bea:55
+#(Player(None, 18, 123, Some(16)), 28)

@@ -1,0 +1,22 @@
+import gleam/float
+import gleam/io
+import gleam/int
+
+def pence_to_pounds(pence: Int) -> Float {
+  int.to_float(pence) *. 0.01
+}
+
+def pounds_to_string(pounds: Float) -> String {
+  "£#{float.to_string(pounds)}"
+}
+
+pub def main() {
+  106.0
+  |> pounds_to_string()
+  |> io.println()
+
+  21
+  |> pence_to_pounds()
+  |> float.to_string()
+  |> echo
+}

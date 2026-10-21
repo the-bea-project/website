@@ -1,0 +1,22 @@
+pub type Player {
+  Player(
+    name: Option(String),
+    level: Int,
+    health: Int,
+    mana: Option(Int),
+  )
+}
+
+pub def revive(Player(health: 0, level: l | _) as p) if l >= 10 {
+  Some(Player(p | health: 100, mana: Some(100)))
+}
+
+pub def revive(Player(health: 0 | _) as p) {
+  Some(Player(p | health: 100))
+}
+
+pub def revive(_) { None }
+
+pub def main() {
+  echo revive(Player(name: None, level: 12, health: 0, mana: None))
+}

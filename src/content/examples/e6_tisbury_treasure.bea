@@ -1,0 +1,44 @@
+import gleam/list 
+
+def place_location_to_treasure_location(
+  place_location: (String, Int),
+) -> (Int, String) {
+  (place_location.1, place_location.0)
+}
+
+def treasure_location_matches_place_location(
+  treasure_location: (Int, String),
+  place_location: (String, Int),
+) -> Bool {
+  place_location
+  |> place_location_to_treasure_location
+  == treasure_location
+}
+
+def count_place_treasures(
+  place: (String, (String, Int)),
+  treasures: List((String, (Int, String)))
+) -> Int {
+  treasure_location = 
+    place.1
+    |> place_location_to_treasure_location()
+
+  list.count(treasures, fn(x) {x.1 == treasure_location})
+}
+
+pub def main() {
+  treasures = [
+    ("Amethyst Octopus", (1, "F")),
+    ("Angry Monkey Figurine", (5, "B")),
+    ("Antique Glass Fishnet Float", (3, "D")),
+    ("Brass Spyglass", (4, "B")),
+    ("Carved Wooden Elephant", (1, "F"))
+  ]
+
+  echo place_location_to_treasure_location(("B", 4))
+  echo treasure_location_matches_place_location((3, "A"), ("B", 4))
+  echo count_place_treasures(
+    ("Aqua Lagoon (Island of Mystery)", ("F", 1)),
+    treasures
+    )
+}

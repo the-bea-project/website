@@ -1,0 +1,28 @@
+def new() {
+  []
+}
+
+def existing() -> List(String) {
+  ["Bea", "Gleam", "Go", "Rust"]
+}
+
+def add_language(languages: List(String), language: String) -> List(String) {
+  [language | languages]
+}
+
+def count_languages(languages: List(String), sum: Int) -> Int
+
+def count_languages([], sum) {
+  sum
+}
+
+def count_languages([_ | tail], sum) {
+  count_languages(tail, sum + 1)
+}
+
+pub def main() {
+  echo new()
+  echo existing()
+  echo add_language(["OCaml", "Gleam"], "Bea")
+  echo count_languages(["jq", "Elm", "Rust", "Kotlin"], 0)
+}

@@ -1,0 +1,86 @@
+import gleam/list
+
+def filter_by_color(wines: List(Wine), color: Color, acc: List(Wine)) -> List(Wine)
+
+def filter_by_color([], _, acc) {
+  acc |> list.reverse()
+}
+
+def filter_by_color([head | tail], color, acc) if head.color == color {
+  filter_by_color(tail, color, [head | acc])
+}
+
+def filter_by_color([_head | tail], color, acc) {
+  filter_by_color(tail, color, acc)
+}
+
+pub def wines_of_color(wines: List(Wine), color color: Color) -> List(Wine) {
+  filter_by_color(wines, color, [])
+}
+
+def filter_by_country(wines: List(Wine), country: String, acc: List(Wine)) -> List(Wine)
+
+def filter_by_country([], _, acc) {
+  acc |> list.reverse()
+}
+
+def filter_by_country([head | tail], country, acc) if head.country == country {
+  filter_by_country(tail, country, [head | acc])
+}
+
+def filter_by_country([_head | tail], country, acc) {
+  filter_by_country(tail, country, acc)
+}
+
+pub def wines_from_country(wines: List(Wine), country country: String) -> List(Wine) {
+  filter_by_country(wines, country, [])
+}
+
+pub def filter(wines: List(Wine), color color: Color, country country: String) -> List(Wine) {
+  wines
+  |> wines_of_color(color)
+  |> wines_from_country(country)
+}
+
+pub type Wine {
+  Wine(name: String, year: Int, country: String, color: Color)
+}
+
+pub type Color {
+  Red
+  Rose
+  White
+}
+
+pub def main() {
+  echo wines_of_color(
+      [
+        Wine("Chardonnay", 2015, "Italy", White),
+        Wine("Pinot grigio", 2017, "Germany", White),
+        Wine("Pinot noir", 2016, "France", Red),
+        Wine("Dornfelder", 2018, "Germany", Rose)
+      ],
+      color: White
+    )
+
+  echo wines_from_country(
+      [
+        Wine("Chardonnay", 2015, "Italy", White),
+        Wine("Pinot grigio", 2017, "Germany", White),
+        Wine("Pinot noir", 2016, "France", Red),
+        Wine("Dornfelder", 2018, "Germany", Rose)
+      ],
+      country: "Germany"
+    )
+
+  echo filter(
+      [
+        Wine("Chardonnay", 2015, "Italy", White),
+        Wine("Pinot grigio", 2017, "Germany", White),
+        Wine("Pinot noir", 2016, "France", Red),
+        Wine("Dornfelder", 2018, "Germany", Rose)
+      ],
+      color: White,
+      country: "Italy"
+    )
+}

@@ -1,0 +1,26 @@
+pub def extract_error(problem: Result(a, b)) -> b {
+  Error(v) = problem
+  v
+}
+
+pub def remove_team_prefix("Team " <> name: String) -> String {
+  name
+}
+
+pub def remove_team_prefix(name: String) -> String {
+  name
+}
+
+pub def split_region_and_team(combined: String) -> (String, String) {
+  [p1, p2] =
+    combined
+    |> string.split(",")
+
+  (p1, remove_team_prefix(p2))
+}
+
+pub def main() {
+  echo extract_error(Error("Not enough coffee"))
+  echo remove_team_prefix("Team Turtle")
+  echo split_region_and_team("East,Team Orange")
+}

@@ -1,0 +1,76 @@
+import gleam/set.{type Set}
+import gleam/string
+
+pub def new_collection(card: String) -> Set(String) {
+  set.from_list([card])
+}
+
+pub def add_card(collection: Set(String), card: String) -> (Bool, Set(String)) {
+  if set.contains(collection, card) {
+    return (True, collection)
+  }
+
+  collection
+  |> set.insert(card)
+  |> fn(x) {(False, x)}
+}
+
+pub def trade_card(my_card: String, their_card: String, collection: Set(String)) -> (Bool, Set(String)) {
+  transaction = collection
+                |> set.delete(my_card)
+                |> set.insert(their_card)
+
+  cond {
+    set.contains(collection, their_card) -> (False, transaction)
+    not set.contains(collection, my_card) -> (False, transaction)
+    _ -> (True, transaction)
+  }
+}
+
+def find_boring(collections: List(Set(String)), acc: Set(String))
+
+def find_boring([], acc) {
+  acc
+}
+
+def find_boring([head | tail], acc) {
+  acc = set.intersection(acc, head)
+  find_boring(tail, acc)
+}
+
+pub def boring_cards([]) {
+  []
+}
+
+pub def boring_cards([head | tail]: List(Set(String))) -> List(String) {
+  find_boring(tail, head)
+  |> set.to_list()
+}
+
+def make_union([], acc) {
+  acc
+}
+
+def make_union([head | tail], acc) {
+  acc = set.union(acc, head)
+  make_union(tail, acc)
+}
+
+pub def total_cards(collections: List(Set(String))) -> Int {
+  collections
+  |> make_union(set.new())
+  |> set.size()
+}
+
+pub def shiny_cards(collection: Set(String)) -> Set(String) {
+  set.filter(collection, fn(x) {string.contains(x, "Shiny ")})
+}
+
+pub def main() {
+  echo new_collection("Newthree")
+  echo add_card(set.from_list(["Newthree"]), "Scientuna")
+  echo trade_card("Scientuna", "Newthree", set.from_list(["Scientuna"]))
+  echo boring_cards([set.from_list(["Scientuna"]), set.from_list(["Newthree", "Scientuna"])])
+  echo total_cards([set.from_list(["Scientuna"]), set.from_list(["Newthree", "Scientuna"])])
+  echo shiny_cards(set.from_list(["Newthree", "Scientuna", "Shiny Scientuna"]))
+}

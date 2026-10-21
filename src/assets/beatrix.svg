@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" width="280" height="280">
+  <defs>
+    <linearGradient id="bh-glow" gradientUnits="userSpaceOnUse" x1="179.3" y1="72.0" x2="752.8" y2="432.1">
+      <stop offset="0" stop-color="#FC61B9"/>
+      <stop offset="0.5" stop-color="#DB82DA"/>
+      <stop offset="1" stop-color="#B492F9"/>
+    </linearGradient>
+    <path id="bh-inner" d="M194.9,297.9 C196.3,291.2 211.4,286.2 217.5,283.5 C268.3,261.5 269.8,225.3 291.7,181.5 C303.7,157.6 321.3,137.0 342.5,120.7 C410.8,68.3 509.4,72.4 571.5,133.4 C615.8,176.9 611.1,222.0 683.0,237.2 C688.4,238.3 704.1,240.1 705.4,246.1 L713.8,244.9 C714.0,260.0 684.5,267.4 667.0,272.4 C550.5,305.6 356.3,322.7 235.0,315.5 C218.1,314.5 188.3,312.3 186.8,298.8 Z"/>
+    <clipPath id="bh-inner-clip"><use href="#bh-inner"/></clipPath>
+  </defs>
+
+  <!-- This group shifts the 482px high graphic down by 209px to perfectly center it in a 900x900 canvas -->
+  <g transform="translate(0, 209)">
+    <!-- lower half of the accretion disc (behind) -->
+    <circle cx="450.0" cy="259.5" r="208.7" fill="url(#bh-glow)" stroke="#3C2B55" stroke-width="14"/>
+    <!-- black hole (part seen below the ring) -->
+    <circle cx="450.0" cy="258.8" r="129.75" fill="#000"/>
+
+    <!-- ring + upper arch -->
+    <path d="M457.5,13.0 C375.4,11.6 300.5,50.1 252.4,116.5 C225.6,153.4 211.7,198.1 178.5,230.5 C146.5,261.7 112.5,267.8 72.5,282.2 C55.3,288.3 25.2,298.7 15.4,315.0 C5.9,330.9 30.8,340.1 42.0,343.4 C78.0,353.9 116.7,357.2 154.0,359.4 C335.0,370.0 525.4,353.5 702.0,312.3 C747.4,301.7 792.9,289.6 836.0,271.7 C852.0,265.0 873.0,256.8 883.2,242.0 C895.7,223.9 866.1,214.6 853.5,211.6 C807.2,200.4 758.0,205.4 715.5,181.0 C675.1,157.8 653.3,118.3 621.5,86.0 C578.5,42.2 519.5,14.0 457.5,13.0 Z" fill="url(#bh-glow)" stroke="#3C2B55" stroke-width="14" stroke-linejoin="round"/>
+    <!-- light inner glow -->
+    <use href="#bh-inner" fill="#FFD3E8"/>
+    <!-- black hole (part seen above the ring) -->
+    <circle cx="450.0" cy="258.8" r="129.75" fill="#000" clip-path="url(#bh-inner-clip)"/>
+    <!-- front edge of the ring -->
+    <path d="M186.8,298.8 C188.3,312.3 218.1,314.5 235.0,315.5 C356.3,322.7 550.5,305.6 667.0,272.4 C684.5,267.4 714.0,260.0 713.8,244.9" fill="none" stroke="#3C2B55" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- face -->
+    <g fill="#FAF3EC">
+      <circle cx="404.0" cy="241.2" r="7.3"/>
+      <circle cx="503.8" cy="241.2" r="7.3"/>
+      <path d="M392.2,247.4 Q393.6,251.1 397.2,252.4 Q393.6,253.8 392.2,257.4 Q390.8,253.8 387.2,252.4 Q390.8,251.1 392.2,247.4 Z"/>
+      <path d="M492.3,247.5 Q493.7,251.2 497.3,252.5 Q493.7,253.8 492.3,257.5 Q490.9,253.8 487.3,252.5 Q490.9,251.2 492.3,247.5 Z"/>
+    </g>
+    <g fill="#FC9A96">
+      <ellipse cx="384.4" cy="272.3" rx="14.7" ry="8"/>
+      <ellipse cx="515.2" cy="272.3" rx="14.7" ry="8"/>
+    </g>
+    <path d="M434.2,266.8 A18.1,18.1 0 0 0 465.2,266.8" fill="none" stroke="#FAF3EC" stroke-width="7.5" stroke-linecap="round"/>
+  </g>
+</svg>
+

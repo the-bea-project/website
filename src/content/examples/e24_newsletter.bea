@@ -1,0 +1,42 @@
+import simplifile
+
+pub def read_emails(path: String) -> Result(List(String), Nil) {
+  data_str = simplifile.read(path) |> result.replace_error(Nil)?
+
+  data_str
+  |> string.trim
+  |> string.split("\n")
+  |> fn(x) {
+    Ok(x)
+  }
+}
+
+pub def create_log_file(path: String) -> Result(Nil, Nil) {
+  simplifile.write(path, "") |> result.replace_error(Nil)
+}
+
+pub def log_sent_email(path: String, email: String) -> Result(Nil, Nil) {
+  simplifile.append(path, "#{email}\n") |> result.replace_error(Nil)
+}
+
+def try_send(email, send_fn, log_path) {
+  if send_fn(email) == Ok(Nil) {
+    log_sent_email(log_path, email)
+  } else {
+    Error(Nil)
+  }
+}
+
+pub def send_newsletter(
+  emails_path: String,
+  log_path: String,
+  send_email: fn(String) -> Result(Nil, Nil),
+) -> Result(Nil, Nil) {
+  emails = read_emails(emails_path)?
+
+  create_log_file(log_path)?
+
+  _ = list.each(emails, fn(email) {try_send(email, send_email, log_path)})  
+
+  Ok(Nil)
+}

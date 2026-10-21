@@ -1,0 +1,24 @@
+pub type TreasureChest(t) {
+  TreasureChest(String, t)
+}
+
+pub type UnlockedResult(t) {
+  Unlocked(t)
+  WrongPassword
+}
+
+def get_treasure(
+  chest: TreasureChest(treasure),
+  password: String
+) -> UnlockedResult(treasure) {
+  TreasureChest(s, t) = chest
+
+  cond {
+    s == password -> Unlocked(t)
+    _ -> WrongPassword
+  }
+}
+
+pub def main() {
+  echo get_treasure(TreasureChest("SomePass", ("a", 2)), "SomePass")
+}

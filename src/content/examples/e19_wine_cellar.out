@@ -1,0 +1,6 @@
+src/e19_wine_cellar.bea:56
+[Wine("Chardonnay", 2015, "Italy", White), Wine("Pinot grigio", 2017, "Germany", White)]
+src/e19_wine_cellar.bea:66
+[Wine("Pinot grigio", 2017, "Germany", White), Wine("Dornfelder", 2018, "Germany", Rose)]
+src/e19_wine_cellar.bea:76
+[Wine("Chardonnay", 2015, "Italy", White)]

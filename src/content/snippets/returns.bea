@@ -1,0 +1,16 @@
+def reply(guess: Int) -> String {
+  if guess == 42 {
+    return "Correct"
+  }
+  if guess == 41 or guess == 43 {
+    return "So close"
+  }
+  if guess > 42 {
+    return "Too high"
+  }
+  "Too low"
+}
+
+pub def main() {
+  echo [reply(42), reply(43), reply(99), reply(1)]
+}

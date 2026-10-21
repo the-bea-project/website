@@ -1,0 +1,26 @@
+pub type Point {
+  Point(x: Int, y: Int)
+}
+
+def first(xs: List(Int)) -> Result(Int, Nil) {
+  [x | _rest] = xs
+  Ok(x)
+}
+
+def demo(p: Point, name: String, raw: String) -> Result(Int, Nil) {
+  x = 1
+  pair = (x, name)
+  hello = "Hi #{name}"
+  scores = %{"bea": 1}
+  moved = Point(p | x: 1)
+  n = int.parse(raw)?
+  if n < 0 {
+    return Error(Nil)
+  }
+  echo #(pair, hello, scores, moved)
+  first([n])
+}
+
+pub def main() {
+  demo(Point(0, 0), "Bea", "4") |> echo
+}

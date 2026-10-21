@@ -1,0 +1,36 @@
+import gleam/dict
+
+pub type Pizza {
+  Margherita
+  Caprese
+  Formaggio
+  ExtraSauce(Pizza)
+  ExtraToppings(Pizza)
+}
+
+def price_map() {
+  %{
+    Margherita: 7,
+    Caprese: 9,
+    Formaggio: 10,
+  }
+}
+
+def calc_pizza_price(p: Pizza, price_map, acc: Int) {
+  case p {
+    ExtraSauce(s) -> calc_pizza_price(s, price_map, acc + 1)
+    ExtraToppings(s) -> calc_pizza_price(s, price_map, acc + 2)
+    _ -> acc + dict.get(price_map, p)? |> Ok
+  }
+}
+
+def pizza_price(p: Pizza) {
+  case calc_pizza_price(p, price_map(), 0) {
+    Ok(price) -> price
+    _ -> panic as "Invalid pizza"
+  }
+}
+
+pub def main() {
+  echo pizza_price(ExtraToppings(ExtraSauce(ExtraSauce(Margherita))))
+}

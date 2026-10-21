@@ -1,0 +1,56 @@
+import gleam/string
+import gleam/list
+import gleam/io
+
+def cleanup(name: String) -> String {
+  name
+  |> string.trim()
+}
+
+def first_letter(name: String) -> String {
+  Ok(first) = 
+    name
+    |> cleanup()
+    |> string.first()
+  
+  first
+}
+
+def initial(name: String) -> String {
+  name
+  |> first_letter
+  |> string.uppercase()
+  <> "."
+}
+
+def initials(fullname: String) -> String {
+  fullname
+  |> string.split(" ")
+  |> list.map(initial)
+  |> string.join(" ")
+}
+
+def pair(fullname1: String, fullname2: String) -> String {
+  "
+      ******       ******
+    **      **   **      **
+  **         ** **         **
+  **            *            **
+  **                         **
+  **     #{initials(fullname1)}  +  #{initials(fullname2)}     **
+  **                       **
+    **                   **
+      **               **
+        **           **
+          **       **
+            **   **
+              ***
+               *
+  "
+
+}
+
+pub def main() {
+  pair("James Pazo", "Rachel Kiador")
+  |> io.println()
+}

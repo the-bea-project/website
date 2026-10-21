@@ -1,0 +1,17 @@
+pub type Event {
+  Click(x: Int, y: Int)
+  Key(String)
+  Tick
+}
+
+pub def main() {
+  [Click(3, 3), Key("q"), Key("j"), Tick]
+  |> list.map(fn {
+    Click(x, y) if x == y -> "diagonal click"
+    Click(..) -> "click"
+    Key("q") -> "quit"
+    Key(k) -> "key #{k}"
+    Tick -> "tick"
+  })
+  |> echo
+}

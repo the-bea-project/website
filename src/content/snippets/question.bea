@@ -1,0 +1,24 @@
+pub type Server {
+  Server(host: String, port: Int)
+}
+
+def parse_port(text: String) -> Result(Int, String) {
+  int.parse(text) |> result.replace_error("not a port: #{text}")
+}
+
+def check_host(host: String) -> Result(String, String) {
+  case string.trim(host) {
+    "" -> Error("missing host")
+    h -> Ok(h)
+  }
+}
+
+pub def server(host: String, port: String) -> Result(Server, String) {
+  host = check_host(host)?
+  port = parse_port(port)?
+  Ok(Server(host:, port:))
+}
+
+pub def main() {
+  [server("localhost", "8080"), server("localhost", "http")] |> echo
+}
