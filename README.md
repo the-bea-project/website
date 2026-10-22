@@ -1,7 +1,6 @@
 # Bea website
 
-The website for [Bea](https://github.com/the-bea-project/bea), a friendlier
-syntax for Gleam. A static site with no framework and no npm dependencies.
+The website for [Bea](https://github.com/the-bea-project/bea), an ergonomic language that transpiles to Gleam. A static site with no framework and no npm dependencies.
 
 - **Home**: what Bea is and why it exists, with every snippet shown as Bea and
   the Gleam it becomes

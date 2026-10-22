@@ -85,7 +85,7 @@ const ICON_THEME = `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" 
 
 function page({ title, description, depth, active, body, bodyClass = "", scripts = [] }) {
   const root = depth === 0 ? "./" : "../".repeat(depth);
-  const fullTitle = title ? `${title} · ${SITE_NAME}` : `${SITE_NAME}: a friendlier way to write Gleam`;
+  const fullTitle = title ? `${title} · ${SITE_NAME}` : `${SITE_NAME}: An ergonomic language that transpiles to Gleam`;
   const nav = [
     ["tour/", "Tour", "tour"],
     ["playground/", "Playground", "playground"],
@@ -132,7 +132,7 @@ ${body}
   <div class="wrap footer-grid">
     <div class="footer-brand">
       <img src="${root}assets/beatrix.svg" alt="" width="56" height="56">
-      <p><strong>Bea</strong> is a friendlier syntax for <a href="https://gleam.run">Gleam</a>. Built on Gleam's compiler, type checker and package ecosystem.</p>
+      <p><strong>Bea</strong> is an ergonomic syntax for <a href="https://gleam.run">Gleam</a>. Built on Gleam's compiler, type checker and package ecosystem.</p>
     </div>
     <nav aria-label="Footer">
       <ul>
@@ -181,10 +181,11 @@ function landing() {
   <div class="wrap hero-grid">
     <div class="hero-copy">
       <h1 class="wordmark">bea</h1>
-      <p class="lede">A friendlier way to write&nbsp;Gleam.</p>
+      <p class="lede">An ergonomic language that&nbsp;transpiles to Gleam.</p>
       <p class="hero-sub">Multi-clause functions with guards, early <code>return</code>, and <code>?</code> for errors. Bea compiles to plain, readable Gleam, so you keep Gleam's type checker, both compile targets and every package on Hex.</p>
       <div class="actions">
         <a class="btn btn-primary" href="tour/">Take the tour</a>
+        <!-- <a class="btn" href="https://discord.gg/wpzXrRF8D">Join the Discord</a> -->
         <a class="btn btn-ghost" href="${REPO}">${ICON_GITHUB}<span>Bea on GitHub</span></a>
       </div>
       <p class="beta"><span class="beta-dot" aria-hidden="true"></span>Sparky beta. The compiler works today; the edges are still being sanded.</p>
@@ -376,7 +377,7 @@ The <> operator expects arguments of this type:
 
   return page({
     title: "",
-    description: "Bea is a friendlier syntax for Gleam: multi-clause functions with guards, early return and ? for errors, compiled to plain, readable Gleam.",
+    description: "Bea is an ergonomic language that transpiles to Gleam: multi-clause functions with guards, early return and ? for errors, compiled to plain, readable Gleam.",
     depth: 0,
     active: "home",
     bodyClass: "home",
@@ -585,6 +586,12 @@ args = ["lsp"]`,
   </header>
 
   <div class="ways">
+    <!--<section class="way">
+      <h2>Join the Discord</h2>
+      <p>Talk about Bea, ask questions about the procedural syntax, or follow the transpiler's development. It's the best place to get help or share what you've built.</p>
+      <a class="btn btn-primary" href="https://discord.gg/wpzXrRF8D">Join the Discord</a>
+    </section>
+    -->
     <section class="way">
       <h2>Report what breaks</h2>
       <p>Found code that doesn't compile, a confusing error, or a formatter that refuses your file? Open an issue with the smallest <code>.bea</code> file that shows it. <code>bea transpile file.bea</code> output helps a lot.</p>
@@ -599,11 +606,6 @@ args = ["lsp"]`,
       <h2>Add to the examples</h2>
       <p>The tour on this site is built from <code>beacode/</code>, Bea solutions to the Gleam exercism track. A new solution there becomes a new lesson here.</p>
       <a class="btn" href="${REPO}/tree/main/beacode">See beacode</a>
-    </section>
-    <section class="way">
-      <h2>Ask about Gleam</h2>
-      <p>Bea is a dialect of Gleam, so questions about types, packages and the BEAM are Gleam questions, and Gleam's community is welcoming and active.</p>
-      <a class="btn" href="https://gleam.run/community/">Gleam community</a>
     </section>
   </div>
 
