@@ -1,0 +1,34 @@
+//// A type's functions are named `<type>_<name>`, and Bea code can reach
+//// them through the type: `Account.decoder()` is `account_decoder()`.
+
+import bea_json/decoder
+
+pub type Role {
+  Admin
+  Member
+}
+
+/// Only records are derived. A union's decoder is written by hand, and is
+/// still `Role.decoder()`; derived records with a `Role` field use it.
+pub def role_decoder() -> decode.Decoder(Role) {
+  use role <- decode.then(decode.string)
+  case role {
+    "admin" -> decode.success(Admin)
+    "member" -> decode.success(Member)
+    _ -> decode.failure(Member, "Role")
+  }
+}
+
+@derive(decoder)
+pub type Account { email: String, role: Role }
+
+pub def main() {
+  json = `{"email": "ada@example.com", "role": "admin"}`
+  Ok(account) = decoder.from_json(json, Account.decoder()) else panic
+  echo account
+  Error(problem) = decoder.from_json(`"guest"`, Role.decoder()) else panic
+  echo problem
+  // The function itself, as a value:
+  parse_role = decoder.from_json(_, Role.decoder())
+  echo list.map([`"admin"`, `"member"`], parse_role)
+}

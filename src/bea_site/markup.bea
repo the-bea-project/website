@@ -1,0 +1,35 @@
+//// Authored HTML: running text with inline `<code>`, links and emphasis is
+//// written as HTML in the page modules, inside the element it belongs to.
+
+import lustre/attribute.{type Attribute}
+import lustre/element.{type Element}
+
+/// `<tag attrs>html</tag>`, with `html` written by hand in this repository
+/// (never user input).
+pub def raw(
+  tag: String,
+  attrs: List(Attribute(msg)),
+  html: String,
+) -> Element(msg) {
+  element.unsafe_raw_html("", tag, attrs, html)
+}
+
+pub def p(html: String) -> Element(msg) {
+  raw("p", [], html)
+}
+
+pub def h2(attrs: List(Attribute(msg)), html: String) -> Element(msg) {
+  raw("h2", attrs, html)
+}
+
+pub def h3(html: String) -> Element(msg) {
+  raw("h3", [], html)
+}
+
+pub def li(html: String) -> Element(msg) {
+  raw("li", [], html)
+}
+
+pub def td(html: String) -> Element(msg) {
+  raw("td", [], html)
+}

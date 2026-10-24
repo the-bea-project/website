@@ -1,0 +1,537 @@
+//// The home page.
+
+import bea_site/code
+import bea_site/content
+import bea_site/highlight.{Bea, Gleam, Shell, Text}
+import bea_site/icons
+import bea_site/layout.{type Page, Page}
+import bea_site/links
+import bea_site/markup
+import gleam/regexp
+import lustre/attribute.{class, href, id}
+import lustre/element.{type Element}
+import lustre/element/html
+
+pub def page() -> Page(Nil) {
+  Page(
+    title: "",
+    description: "Bea is an ergonomic language that transpiles to Gleam: multi-clause functions with guards, early return, ? and else guards for errors, records and @derive, compiled to plain, readable Gleam. Its compiler is written in Bea.",
+    root: "./",
+    active: "home",
+    body_class: "home",
+    body: [
+      hero(),
+      horizon(),
+      why(),
+      features(),
+      glance(),
+      self_hosted(),
+      ecosystem(),
+      try_it(),
+      cousins(),
+    ],
+    modules: [],
+  )
+}
+
+// --- Hero --------------------------------------------------------------------------------
+
+def hero() -> Element(msg) {
+  html.section([class("hero")], [
+    html.div([class("stars"), attribute.aria_hidden(True)], []),
+    html.div([class("wrap hero-grid")], [
+      html.div([class("hero-copy")], [
+        html.h1([class("wordmark")], [html.text("bea")]),
+        markup.raw(
+          "p",
+          [class("lede")],
+          "An ergonomic language that&nbsp;transpiles to Gleam.",
+        ),
+        markup.raw(
+          "p",
+          [class("hero-sub")],
+          "Multi-clause functions with guards, early <code>return</code>, <code>?</code> and <code>else</code> for errors, records and <code>@derive</code>. Bea compiles to plain, readable Gleam, so you keep Gleam's type checker, both compile targets and every package on Hex.",
+        ),
+        html.div([class("actions")], [
+          html.a([class("btn btn-primary"), href("tour/")], [
+            html.text("Take the tour"),
+          ]),
+          // Bea's own Discord, not linked for now (see links.discord):
+          // html.a([class("btn"), href(links.discord)], [html.text("Join the Discord")]),
+          html.a([class("btn btn-ghost"), href("toolchain/")], [
+            html.text("Install"),
+          ]),
+          html.a([class("btn btn-ghost"), href(links.repo)], [
+            icons.github(),
+            html.span([], [html.text("Bea on GitHub")]),
+          ]),
+        ]),
+        html.a([class("hosted-badge"), href("#self-hosted")], [
+          html.span([class("hosted-dot"), attribute.aria_hidden(True)], []),
+          html.span([], [
+            html.strong([], [
+              html.text("Bea #{links.release_version} is self-hosted. "),
+            ]),
+            html.text("Its compiler is written in Bea, and so is this site."),
+          ]),
+        ]),
+        html.p([class("beta")], [
+          html.span([class("beta-dot"), attribute.aria_hidden(True)], []),
+          html.text(
+            "Sparky beta. The compiler works today; the edges are still being sanded.",
+          ),
+        ]),
+      ]),
+      markup.raw("div", [class("hero-art")], beatrix()),
+    ]),
+  ])
+}
+
+/// The mascot inline in the hero, so her eyes can blink.
+def beatrix() -> String {
+  Ok(size) = regexp.from_string(" width=\"\\d+\" height=\"\\d+\"") else panic
+  content.asset("beatrix.svg")
+  |> regexp.replace(size, _, "")
+  |> string.replace(
+    "<svg ",
+    "<svg class=\"beatrix\" role=\"img\" aria-label=\"Beatrix, a small smiling black hole\" ",
+  )
+  |> string.replace(
+    "<g fill=\"#FAF3EC\">",
+    "<g class=\"bx-eyes\" fill=\"#FAF3EC\">",
+  )
+}
+
+def horizon() -> Element(msg) {
+  html.section(
+    [class("horizon-section"), attribute.aria_labelledby("horizon-title")],
+    [
+      html.div([class("wrap")], [
+        html.div([class("horizon")], [
+          html.div([class("horizon-pane")], [
+            code.file(
+              "hero-bea",
+              "shapes.bea",
+              Bea,
+              content.read("snippets/hero.bea"),
+            ),
+          ]),
+          html.div(
+            [class("horizon-core"), attribute.aria_hidden(True)],
+            [
+              html.img([
+                attribute.src("assets/beatrix.svg"),
+                attribute.alt(""),
+                attribute.width(64),
+                attribute.height(64),
+              ]),
+            ],
+          ),
+          html.div([class("horizon-pane")], [
+            code.file(
+              "hero-gleam",
+              "shapes.gleam, generated",
+              Gleam,
+              content.read("snippets/hero.gleam"),
+            ),
+          ]),
+        ]),
+        markup.h2(
+          [id("horizon-title"), class("horizon-caption")],
+          "Bea goes in, Gleam comes out. The Gleam is what you would have written by hand: the clauses become a <code>case</code>, the <code>return</code> becomes a <code>bool.guard</code>, and the imports are added for you.",
+        ),
+      ]),
+    ],
+  )
+}
+
+// --- Why ---------------------------------------------------------------------------------
+
+def why() -> Element(msg) {
+  promise = fn(title, text) {
+    html.li([], [html.h3([], [html.text(title)]), markup.p(text)])
+  }
+  html.section(
+    [class("why"), attribute.aria_labelledby("why-title")],
+    [
+      html.div([class("wrap why-grid")], [
+        html.div([class("prose")], [
+          html.h2([id("why-title")], [html.text("Why Bea exists")]),
+          markup.p(
+            "Gleam is a lovely language: a sound type system, friendly errors, and code that runs on the Erlang VM or in JavaScript. Writing it day to day, a few things wear on you.",
+          ),
+          markup.p(
+            "A function that handles three shapes of input becomes one function wrapping one big <code>case</code>. There is no early return, so a guard clause is <code>use &lt;- bool.guard(…)</code> or another level of nesting. Error handling chains through <code>use x &lt;- result.try(…)</code>, which quietly turns the rest of your function into a callback. Decoders and encoders repeat every field of a type by hand. All of it works, and none of it is how you think about the problem.",
+          ),
+          markup.p(
+            "Bea keeps Gleam's meaning and changes how it reads. It borrows Elixir's multi-clause functions and guards, adds <code>return</code>, <code>?</code> and <code>else</code> guards, writes record boilerplate with <code>@derive</code>, and drops <code>let</code>. There are no macros, no new runtime and no new type system, just a syntax that lowers to idiomatic Gleam.",
+          ),
+        ]),
+        html.ul([class("promises")], [
+          promise(
+            "Gleam's type checker",
+            "Every line is checked by the Gleam compiler. Its errors are rewritten to point at your <code>.bea</code> file.",
+          ),
+          promise(
+            "Gleam's ecosystem",
+            "Any Gleam package works with nothing to wrap, and <code>bea publish</code> ships ordinary Gleam packages to Hex.",
+          ),
+          promise(
+            "A way out, any time",
+            "<code>bea transpile --out</code> writes your project as a plain Gleam project. Trying Bea costs nothing to undo.",
+          ),
+        ]),
+      ]),
+    ],
+  )
+}
+
+// --- Features ----------------------------------------------------------------------------
+
+type Feature {
+  id: String,
+  title: String,
+  body: String,
+  bea: String,
+  gleam: String,
+}
+
+def snippet(name: String, title: String, body: String) -> Feature {
+  Feature(
+    id: name,
+    title:,
+    body:,
+    bea: content.read("snippets/#{name}.bea"),
+    gleam: content.read("snippets/#{name}.gleam"),
+  )
+}
+
+/// The tour explains the lesson in its `////` comment; here the text beside
+/// the code does.
+def without_module_doc(source: String) -> String {
+  source
+  |> string.split("\n")
+  |> list.drop_while(fn(line) {
+    string.starts_with(line, "////") or line == ""
+  })
+  |> string.join("\n")
+}
+
+def features() -> Element(msg) {
+  list = [
+    snippet(
+      "clauses",
+      "Functions with clauses",
+      "<p>Write one <code>def</code> per shape of input, Elixir style. Clauses can match patterns and carry <code>if</code> guards, and an optional body-less head declares the types once.</p><p>They compile to a single Gleam function with a <code>case</code>, so recursion in tail position stays tail-call optimised.</p>",
+    ),
+    snippet(
+      "returns",
+      "Return early",
+      "<p>Check the edge cases first and get out. <code>return</code> works anywhere a statement goes: at the top of a function, inside <code>if</code> and <code>case</code> branches, and inside anonymous functions.</p><p>The returned expression is only evaluated when its branch is taken.</p>",
+    ),
+    snippet(
+      "question",
+      "Bubble errors up with <code>?</code>",
+      "<p><code>expr?</code> gives you the value inside an <code>Ok</code>, or returns the <code>Error</code> from the enclosing function. It works inside any expression, and after a pipeline it applies to the whole pipeline.</p><p>Evaluation order is kept, and short-circuiting is respected: in <code>flag and parse(s)?</code>, <code>parse</code> only runs when <code>flag</code> is true.</p>",
+    ),
+    snippet(
+      "guards",
+      "Match or leave, with <code>else</code>",
+      "<p>A guard is an assignment that has to match, followed by what to return when it doesn't: <code>Ok(item) = … else Error(…)</code>. A plain condition works too: <code>quantity &gt; 0 else …</code>.</p><p>With <code>?</code>, the pattern is for the <code>Ok</code> value and <code>else e -&gt; …</code> binds the error, and any guard can bind what didn't match. The checks read top to bottom and become nested <code>case</code>s, without the callbacks of <code>use</code>, which still works for code that wraps the rest of a function.</p>",
+    ),
+    snippet(
+      "anon",
+      "Anonymous functions with clauses",
+      "<p><code>fn { … }</code> is an anonymous function made of clauses. Hand it straight to <code>list.map</code> instead of writing <code>fn(x) { case x { … } }</code>.</p>",
+    ),
+    snippet(
+      "records",
+      "Records, in braces",
+      "<p>A type with a single constructor named like the type lists its fields in braces: <code>pub type Player { name: String, level: Int }</code>. It is exactly the long form, so patterns, updates and <code>@derive</code> work the same.</p><p>Record patterns can name a few fields and skip the rest with <code>| _</code>. <code>as</code> keeps the whole value, and <code>Player(p | health: 100)</code> copies it with one field changed.</p>",
+    ),
+    Feature(
+      id: "derive",
+      title: "Derive the boilerplate",
+      body: "<p><code>@derive(decoder, encoder)</code> writes the functions that follow a record's fields one by one, and Bea code calls them through the type: <code>User.decoder()</code>.</p><p>The compiler knows no format: an ordinary library, the <em>deriver</em>, decides what the functions do. JSON, HTML forms, your own format. The Gleam is what you would write by hand.</p>",
+      bea: without_module_doc(content.read("features/src/deriving.bea")),
+      gleam: without_module_doc(
+        content.read("features/generated/deriving.gleam"),
+      ),
+    ),
+  ]
+  html.section(
+    [class("features"), attribute.aria_labelledby("features-title")],
+    [
+      html.div([class("wrap")], [
+        html.h2([id("features-title"), class("section-title")], [
+          html.text("What it feels like"),
+        ]) |
+        list.map(list, feature)
+      ]),
+    ],
+  )
+}
+
+def feature(f: Feature) -> Element(msg) {
+  html.article([class("feature")], [
+    html.div([class("feature-text")], [
+      markup.h3(f.title),
+      markup.raw("div", [], f.body),
+    ]),
+    html.div([class("feature-code")], [
+      code.tabs(
+        "f-" <> f.id,
+        [
+          code.tab("Bea", Bea, f.bea),
+          code.tab("Gleam it becomes", Gleam, f.gleam),
+        ],
+        caption: f.id,
+        actions: [],
+        extra_class: "",
+      ),
+    ]),
+  ])
+}
+
+// --- Glance ------------------------------------------------------------------------------
+
+const glance_rows = [
+  (
+    "let x = 1",
+    "x = 1",
+    "No <code>let</code>. Patterns that can fail get <code>let assert</code> for you.",
+  ),
+  ("#(1, \"two\")", "(1, \"two\")", "Tuples use parentheses."),
+  (`"Hi " <> name`, `"Hi #{name}"`, "String interpolation."),
+  (
+    "dict.from_list([#(\"bea\", 1)])",
+    "%{\"bea\": 1}",
+    "Map literals, and <code>%{m | k: v}</code> to update.",
+  ),
+  (
+    "pub type User {\n  User(name: String, age: Int)\n}",
+    "pub type User { name: String, age: Int }",
+    "Records list their fields in braces.",
+  ),
+  ("Point(..p, x: 1)", "Point(p | x: 1)", "Record update, Elixir style."),
+  ("[x, ..rest]", "[x | rest]", "List patterns and prepends."),
+  (
+    "use n <- result.try(int.parse(raw))",
+    "n = int.parse(raw)?",
+    "<code>?</code> unwraps <code>Ok</code> or returns the <code>Error</code>.",
+  ),
+  (
+    "use <- bool.guard(n < 0, Error(Nil))",
+    "if n < 0 {\n  return Error(Nil)\n}",
+    "Early return, anywhere a statement goes.",
+  ),
+  (
+    "case dict.get(form, \"name\") {\n  Ok(name) -> …\n  _ -> Error(Missing)\n}",
+    "Ok(name) = dict.get(form, \"name\") else Error(Missing)\n…",
+    "<code>else</code> guards: match or leave, and the rest stays flat.",
+  ),
+  (
+    "user_decoder()",
+    "User.decoder()",
+    "A type's functions, reached through the type.",
+  ),
+]
+
+def glance() -> Element(msg) {
+  html.section(
+    [class("glance"), attribute.aria_labelledby("glance-title")],
+    [
+      html.div([class("wrap")], [
+        html.h2([id("glance-title"), class("section-title")], [
+          html.text("The Gleam you know, spelled shorter"),
+        ]),
+        markup.raw(
+          "p",
+          [class("section-lede")],
+          "Everything else is Gleam as written: <code>case</code>, <code>use</code>, pipes, captures, labelled arguments, <code>echo</code>, <code>assert</code>, bit arrays and <code>@external</code>.",
+        ),
+        html.div([class("table-scroll"), attribute.tabindex(0)], [
+          html.table([], [
+            html.thead([], [
+              html.tr([], [
+                html.th([attribute.scope("col")], [html.text("Gleam")]),
+                html.th([attribute.scope("col")], [html.text("Bea")]),
+                html.th([attribute.scope("col")], [html.text("What changed")]),
+              ]),
+            ]),
+            html.tbody(
+              [],
+              list.map(glance_rows, fn(row) {
+                (gleam, bea, note) = row
+                html.tr([], [
+                  html.td([], [code.pre(gleam, Gleam)]),
+                  html.td([], [code.pre(bea, Bea)]),
+                  markup.td(note),
+                ])
+              }),
+            ),
+          ]),
+        ]),
+      ]),
+    ],
+  )
+}
+
+// --- Self-hosted ---------------------------------------------------------------------------
+
+/// The compiler's own pipeline, as the site's copy of it has it.
+def compiler_excerpt() -> String {
+  source = content.read("../src/bea/compiler.bea")
+  Ok((_, rest)) = string.split_once(source, "pub def compile_module(")
+    else panic
+  Ok((body, _)) = string.split_once(rest, "\n}\n") else panic
+  "pub def compile_module(" <> body <> "\n}\n"
+}
+
+def self_hosted() -> Element(msg) {
+  html.section(
+    [
+      class("hosted"),
+      id("self-hosted"),
+      attribute.aria_labelledby("hosted-title"),
+    ],
+    [
+      html.div([class("wrap hosted-grid")], [
+        html.div([class("prose")], [
+          html.p([class("kicker")], [
+            html.text("New in #{links.release_version}"),
+          ]),
+          html.h2([id("hosted-title")], [html.text("Bea is written in Bea")]),
+          markup.p(
+            "The compiler, the formatter, the language server and the <code>bea</code> command are Bea code. The repository is an ordinary Bea project: <code>bea build</code> compiles it, <code>bea test</code> runs its tests, and <code>bea pack</code> turns it into the standalone <code>bea</code> on the releases page. Every new compiler builds itself, and the Gleam it generates for its own source stays the same from one build to the next.",
+          ),
+          markup.p(
+            "On the right is the heart of it, from <code>src/bea/compiler.bea</code>: parse, write the functions <code>@derive</code> asks for, resolve <code>Type.name</code>, lower the Bea-only syntax, print Gleam.",
+          ),
+          html.h3([], [html.text("This site, too")]),
+          markup.p(
+            "This website is a Bea project as well. Every page is a <a href=\"" <> links.lustre <> "\">Lustre</a> view written in Bea and rendered to HTML on Node, and the theme switch, the tabs and the playground are Bea compiled to JavaScript. The playground runs the compiler's own Bea source, compiled for your browser by the same build.",
+          ),
+          html.p([], [
+            html.a([class("btn"), href(links.repo)], [
+              html.text("Read the compiler"),
+            ]),
+            html.text(" "),
+            html.a([class("btn btn-quiet"), href(links.site_repo)], [
+              html.text("Read this site"),
+            ]),
+          ]),
+        ]),
+        html.div([class("hosted-code")], [
+          code.file("hosted", "src/bea/compiler.bea", Bea, compiler_excerpt()),
+          code.file(
+            "hosted-sh",
+            "Building Bea with Bea",
+            Shell,
+            "$ bea build            # your bea builds the compiler\n$ scripts/bea build    # which rebuilds itself\n$ scripts/bea test     # and tests itself\n$ bea pack             # build/bea, standalone",
+          ),
+        ]),
+      ]),
+    ],
+  )
+}
+
+// --- Ecosystem, playground, Beatrix ---------------------------------------------------------
+
+def ecosystem() -> Element(msg) {
+  html.section(
+    [class("ecosystem"), attribute.aria_labelledby("eco-title")],
+    [
+      html.div([class("wrap eco-grid")], [
+        html.div([class("prose")], [
+          html.h2([id("eco-title")], [html.text("Everything Gleam has")]),
+          markup.p(
+            "A Bea project is a Gleam project with <code>bea.toml</code> in place of <code>gleam.toml</code> and <code>.bea</code> files in <code>src/</code>. The <code>bea</code> command wraps Gleam's tooling: dependencies come from Hex, builds target Erlang or JavaScript, and Gleam modules and FFI files can live right next to your Bea code.",
+          ),
+          html.ul([class("checks")], [
+            markup.li(
+              "Any Gleam package, straight from Hex: <code>bea add lustre gleam_json</code>",
+            ),
+            markup.li("Erlang and JavaScript targets"),
+            markup.li(
+              "Tests with <code>bea test</code>, and one standalone executable with <code>bea pack</code>",
+            ),
+            markup.li(
+              "A language server with Gleam's hovers, completion, go to definition and rename, on <code>.bea</code> files, for VS Code, Neovim and Helix",
+            ),
+            markup.li("A formatter: <code>bea format</code>"),
+            markup.li(
+              "Compiler errors, <code>echo</code> output and stack traces that point at your Bea source",
+            ),
+          ]),
+          html.p([], [
+            html.a([href("toolchain/")], [
+              html.text("The whole toolchain, command by command →"),
+            ]),
+          ]),
+        ]),
+        html.div([class("eco-code")], [
+          code.file(
+            "eco-sh",
+            "Terminal",
+            Shell,
+            "$ bea new my_app\n$ cd my_app\n$ bea add gleam_json\n$ bea run\n$ bea test\n$ bea transpile src/my_app.bea   # show the Gleam\n$ bea pack                       # one executable",
+          ),
+          code.file(
+            "eco-error",
+            "A Gleam type error, pointing at Bea",
+            Text,
+            "error: Type mismatch\n   ┌─ src/demo.bea:16:22\n   │\n16 │   label = \"n is \" <> n\n   │                      ^\n\nThe <> operator expects arguments of this type:\n    String",
+          ),
+        ]),
+      ]),
+    ],
+  )
+}
+
+def try_it() -> Element(msg) {
+  html.section(
+    [class("try"), attribute.aria_labelledby("try-title")],
+    [
+      html.div([class("wrap")], [
+        html.div([class("try-inner")], [
+          html.div([], [
+            html.h2([id("try-title")], [
+              html.text("Try it without installing anything"),
+            ]),
+            html.p([], [
+              html.text(
+                "The playground runs Bea's real compiler in your browser. Type Bea on the left, read the Gleam on the right.",
+              ),
+            ]),
+          ]),
+          html.a([class("btn btn-primary"), href("playground/")], [
+            html.text("Open the playground"),
+          ]),
+        ]),
+      ]),
+    ],
+  )
+}
+
+def cousins() -> Element(msg) {
+  html.section(
+    [class("cousins"), attribute.aria_labelledby("cousins-title")],
+    [
+      html.div([class("wrap cousins-inner")], [
+        html.img([
+          attribute.src("assets/beatrix.svg"),
+          attribute.alt("Beatrix"),
+          attribute.width(160),
+          attribute.height(160),
+        ]),
+        html.div([class("prose")], [
+          html.h2([id("cousins-title")], [html.text("Meet Beatrix")]),
+          markup.p(
+            "Beatrix is Bea's mascot: a small, cheerful black hole. Gleam's Lucy is a star, which makes the two of them cousins in the same sky. Whatever you write falls into Beatrix, and Gleam comes out the other side.",
+          ),
+        ]),
+      ]),
+    ],
+  )
+}

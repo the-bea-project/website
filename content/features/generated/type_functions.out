@@ -1,0 +1,6 @@
+src/type_functions.bea:28
+Account("ada@example.com", Admin)
+src/type_functions.bea:30
+UnableToDecode([DecodeError("Role", "String", [])])
+src/type_functions.bea:33
+[Ok(Admin), Ok(Member)]

@@ -1,0 +1,216 @@
+//// The page shell every page shares: head, header, footer, and the browser
+//// modules the page starts.
+
+import bea_site/icons
+import bea_site/links
+import lustre/attribute.{attribute, class, href}
+import lustre/element.{type Element}
+import lustre/element/html
+
+pub type Page(msg) {
+  title: String,
+  description: String,
+  /// The way back to the site root from this page: "./", "../", ..., or an
+  /// absolute base path for 404.html.
+  root: String,
+  /// The nav entry to mark as current ("tour", "toolchain", ...).
+  active: String,
+  body_class: String,
+  body: List(Element(msg)),
+  /// Browser modules to start, from `bea_site/browser/`. Every page gets
+  /// `enhance`.
+  modules: List(String),
+}
+
+const site_name = "Bea"
+
+const nav = [
+  ("tour/", "Tour", "tour"),
+  ("toolchain/", "Toolchain", "toolchain"),
+  ("playground/", "Playground", "playground"),
+  ("community/", "Community", "community"),
+]
+
+/// The page as a complete HTML document.
+pub def render(page: Page(msg)) -> String {
+  full_title = case page.title {
+    "" -> "#{site_name}: An ergonomic language that transpiles to Gleam"
+    title -> "#{title} · #{site_name}"
+  }
+  html.html([attribute.lang("en")], [
+    html.head([], head(page, full_title)),
+    html.body([class(page.body_class)], body(page)),
+  ])
+  |> element.to_document_string
+}
+
+def head(page: Page(msg), full_title: String) -> List(Element(msg)) {
+  root = page.root
+  [
+    html.meta([attribute.charset("utf-8")]),
+    html.meta([
+      attribute.name("viewport"),
+      attribute.content("width=device-width, initial-scale=1"),
+    ]),
+    html.title([], full_title),
+    html.meta([
+      attribute.name("description"),
+      attribute.content(page.description),
+    ]),
+    html.meta([
+      attribute("property", "og:title"),
+      attribute.content(full_title),
+    ]),
+    html.meta([
+      attribute("property", "og:description"),
+      attribute.content(page.description),
+    ]),
+    html.meta([attribute("property", "og:type"), attribute.content("website")]),
+    html.meta([attribute.name("theme-color"), attribute.content("#150E22")]),
+    html.link([
+      attribute.rel("icon"),
+      href(root <> "assets/beatrix.svg"),
+      attribute.type_("image/svg+xml"),
+    ]),
+    html.link([
+      attribute.rel("preconnect"),
+      href("https://fonts.googleapis.com"),
+    ]),
+    html.link([
+      attribute.rel("preconnect"),
+      href("https://fonts.gstatic.com"),
+      attribute.crossorigin(""),
+    ]),
+    html.link([
+      attribute.rel("stylesheet"),
+      href(
+        "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,400..600&family=Unbounded:wght@500..700&display=swap",
+      ),
+    ]),
+    html.link([attribute.rel("stylesheet"), href(root <> "assets/style.css")]),
+    // Applied before the first paint, so a saved theme never flashes the
+    // other one. The only script on the site that isn't Bea compiled to
+    // JavaScript: it has to run before any module can load.
+    html.script(
+      [],
+      `try{var t=localStorage.getItem("bea-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}`,
+    ),
+  ]
+}
+
+def body(page: Page(msg)) -> List(Element(msg)) {
+  root = page.root
+  modules = ["enhance" | list.filter(page.modules, fn(m) { m != "enhance" })]
+  list.flatten([
+    [
+      html.a([class("skip"), href("#main")], [html.text("Skip to content")]),
+      header(root, page.active),
+      html.main([attribute.id("main")], page.body),
+      footer(root),
+    ],
+    list.map(modules, start_module(root, _)),
+  ])
+}
+
+def header(root: String, active: String) -> Element(msg) {
+  links =
+    nav
+    |> list.map(fn(entry) {
+      (path, label, key) = entry
+      current = if key == active {
+        [attribute.aria_current("page")]
+      } else {
+        []
+      }
+      html.li([], [html.a([href(root <> path) | current], [html.text(label)])])
+    })
+  github = html.li([], [
+    html.a(
+      [class("gh"), href(links.repo), attribute.aria_label("Bea on GitHub")],
+      [icons.github(), html.span([], [html.text("GitHub")])],
+    ),
+  ])
+  html.header([class("site-header")], [
+    html.div([class("bar")], [
+      html.a(
+        [class("brand"), href(root), attribute.aria_label("Bea home")],
+        [
+          html.img([
+            attribute.src(root <> "assets/beatrix.svg"),
+            attribute.alt(""),
+            attribute.width(34),
+            attribute.height(34),
+          ]),
+          html.span([], [html.text("bea")]),
+        ],
+      ),
+      html.nav([attribute.aria_label("Main")], [
+        html.ul([], list.append(links, [github])),
+      ]),
+      html.button(
+        [
+          class("theme-toggle"),
+          attribute.type_("button"),
+          attribute.aria_label("Switch colour theme"),
+          attribute.title("Switch colour theme"),
+        ],
+        [icons.theme()],
+      ),
+    ]),
+  ])
+}
+
+def footer(root: String) -> Element(msg) {
+  link = fn(url, label) {
+    html.li([], [html.a([href(url)], [html.text(label)])])
+  }
+  html.footer([class("site-footer")], [
+    html.div([class("wrap footer-grid")], [
+      html.div([class("footer-brand")], [
+        html.img([
+          attribute.src(root <> "assets/beatrix.svg"),
+          attribute.alt(""),
+          attribute.width(56),
+          attribute.height(56),
+        ]),
+        html.p([], [
+          html.strong([], [html.text("Bea")]),
+          html.text(" is an ergonomic syntax for "),
+          html.a([href(links.gleam)], [html.text("Gleam")]),
+          html.text(
+            ". Built on Gleam's compiler, type checker and package ecosystem, and written in Bea itself.",
+          ),
+        ]),
+      ]),
+      html.nav([attribute.aria_label("Footer")], [
+        html.ul([], [
+          link(root <> "tour/", "Language tour"),
+          link(root <> "toolchain/", "Toolchain"),
+          link(root <> "playground/", "Playground"),
+          link(root <> "community/", "Community"),
+          link(links.gleam_discord_topic, "Talk on the Gleam Discord"),
+          link(links.repo, "Source on GitHub"),
+          link(links.issues, "Report an issue"),
+        ]),
+      ]),
+    ]),
+    html.p([class("wrap fine")], [
+      html.text("This site is written in Bea too: "),
+      html.a([href(links.site_repo)], [html.text("its source")]),
+      html.text(" is a Bea project, rendered with "),
+      html.a([href(links.lustre)], [html.text("Lustre")]),
+      html.text(
+        ". Beatrix is Bea's mascot. Gleam and Lucy belong to the Gleam project; Bea is an independent project.",
+      ),
+    ]),
+  ])
+}
+
+/// Starts one of the site's browser modules: Bea, compiled to JavaScript
+/// by the same build that rendered this page.
+def start_module(root: String, name: String) -> Element(msg) {
+  html.script(
+    [attribute.type_("module")],
+    "import { main } from \"#{root}assets/js/bea_site/bea_site/browser/#{name}.mjs\"; main();",
+  )
+}

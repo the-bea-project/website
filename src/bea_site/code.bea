@@ -1,0 +1,146 @@
+//// Code blocks: one file, or tabs (Bea / the Gleam it becomes / output).
+//// The tabs work without JavaScript as far as reading the first one goes;
+//// `bea_site/browser/enhance` makes them switch.
+
+import bea_site/highlight.{type Lang}
+import bea_site/icons
+import lustre/attribute.{class}
+import lustre/element.{type Element}
+import lustre/element/html
+
+pub type Tab { label: String, lang: Lang, code: String }
+
+pub def tab(label: String, lang: Lang, code: String) -> Tab {
+  Tab(label:, lang:, code:)
+}
+
+/// A single file, its name in the header.
+pub def file(
+  id: String,
+  name: String,
+  lang: Lang,
+  code: String,
+) -> Element(msg) {
+  view(id, [Tab(name, lang, code)], "", [], "")
+}
+
+/// Tabs. `caption` names the tab list for screen readers, `actions` go in the
+/// header (the tour's "Open in playground"), `extra_class` on the block.
+pub def tabs(
+  id: String,
+  tabs: List(Tab),
+  caption caption: String,
+  actions actions: List(Element(msg)),
+  extra_class extra_class: String,
+) -> Element(msg) {
+  view(id, tabs, caption, actions, extra_class)
+}
+
+def view(
+  id: String,
+  tabs: List(Tab),
+  caption: String,
+  actions: List(Element(msg)),
+  extra_class: String,
+) -> Element(msg) {
+  single = list.length(tabs) == 1
+  head = case tabs {
+    [only] ->
+      html.div([class("code-head")], [
+        html.span([class("code-file")], [html.text(only.label)]),
+        copy_button(),
+      ])
+    _ ->
+      html.div(
+        [class("code-head")],
+        list.flatten([
+          [
+            html.div(
+              [
+                class("tabs"),
+                attribute.role("tablist"),
+                attribute.aria_label(caption),
+              ],
+              list.index_map(tabs, fn(t, i) { tab_button(id, t, i) }),
+            ),
+          ],
+          actions,
+          [copy_button()],
+        ]),
+      )
+  }
+  panels = list.index_map(tabs, fn(t, i) { panel(id, t, i, single) })
+  html.div([class(string.trim("code " <> extra_class))], [head | panels])
+}
+
+def tab_button(id: String, t: Tab, i: Int) -> Element(msg) {
+  html.button(
+    [
+      attribute.role("tab"),
+      attribute.id("#{id}-t#{int.to_string(i)}"),
+      attribute.aria_controls("#{id}-p#{int.to_string(i)}"),
+      attribute.aria_selected(i == 0),
+      attribute.tabindex(
+        if i == 0 {
+          0
+        } else {
+          -1
+        },
+      ),
+      attribute.data("lang", highlight.lang_name(t.lang)),
+    ],
+    [html.text(t.label)],
+  )
+}
+
+def panel(id: String, t: Tab, i: Int, single: Bool) -> Element(msg) {
+  aria = if single {
+    []
+  } else {
+    [
+      attribute.role("tabpanel"),
+      attribute.id("#{id}-p#{int.to_string(i)}"),
+      attribute.aria_labelledby("#{id}-t#{int.to_string(i)}"),
+    ]
+  }
+  html.div(
+    [
+      class("code-panel"),
+      attribute.hidden(i != 0),
+      attribute.data("lang", highlight.lang_name(t.lang)) |
+      aria
+    ],
+    [
+      html.pre([attribute.tabindex(0)], [
+        html.code(
+          [class("lang-" <> highlight.lang_name(t.lang))],
+          highlight.view(string.trim_end(t.code), t.lang),
+        ),
+      ]),
+    ],
+  )
+}
+
+pub def copy_button() -> Element(msg) {
+  html.button(
+    [
+      class("copy"),
+      attribute.type_("button"),
+      attribute.aria_label("Copy code"),
+    ],
+    [icons.copy(), html.span([], [html.text("Copy")])],
+  )
+}
+
+/// Highlighted code inside running text.
+pub def inline(source: String, lang: Lang) -> Element(msg) {
+  html.code(
+    [class("lang-" <> highlight.lang_name(lang))],
+    highlight.view(source, lang),
+  )
+}
+
+/// A highlighted `<pre>` without the block around it (the glance table).
+pub def pre(source: String, lang: Lang) -> Element(msg) {
+  html.pre([], [inline(source, lang)])
+}

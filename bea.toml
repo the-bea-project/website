@@ -1,0 +1,19 @@
+name = "bea_site"
+version = "0.3.0"
+description = "The website for the Bea programming language, written in Bea"
+repository = { type = "github", user = "the-bea-project", repo = "website" }
+
+# The whole site is one Bea project on the JavaScript target: `bea run`
+# renders every page on Node, and the same build compiles the browser
+# modules (src/bea_site/browser/) the pages load.
+target = "javascript"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+lustre = ">= 5.7.1 and < 6.0.0"
+plinth = ">= 0.11.0 and < 1.0.0"
+gleam_javascript = ">= 1.0.1 and < 2.0.0"
+simplifile = ">= 2.7.0 and < 3.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+gleam_regexp = ">= 1.1.1 and < 2.0.0"
+envoy = ">= 1.2.0 and < 2.0.0"

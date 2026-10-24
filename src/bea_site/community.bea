@@ -1,0 +1,146 @@
+//// The community page: where to talk, report and contribute, and editor
+//// setup.
+
+import bea_site/code
+import bea_site/highlight.{Text, Toml}
+import bea_site/icons
+import bea_site/layout.{type Page, Page}
+import bea_site/links
+import bea_site/markup
+import lustre/attribute.{class, href, id}
+import lustre/element.{type Element}
+import lustre/element/html
+
+pub def page() -> Page(Nil) {
+  Page(
+    title: "Community",
+    description: "Talk about Bea on the Gleam Discord, report issues, contribute to the compiler (written in Bea) and this site, and set up your editor.",
+    root: "../",
+    active: "community",
+    body_class: "community-page",
+    body: [
+      html.div([class("wrap community")], [
+        html.header([class("page-head")], [
+          html.h1([], [html.text("Community")]),
+          html.p([class("section-lede")], [
+            html.text(
+              "Bea is young, and the people trying it now shape what it becomes. Conversation happens with the Gleam community, and the code is all in the open on GitHub.",
+            ),
+          ]),
+        ]),
+        html.div([class("ways")], [
+          way(
+            "Talk on the Gleam Discord",
+            "Bea has a topic on the Gleam Discord: ask questions, share what you've built, or follow the compiler's development. Bea is Gleam underneath, so it belongs with the Gleam community.",
+            html.a(
+              [class("btn btn-primary"), href(links.gleam_discord_topic)],
+              [icons.chat(), html.span([], [html.text("Open the Bea topic")])],
+            ),
+          ),
+          // Bea's own Discord server, not linked for now:
+          // way(
+          //   "Join the Discord",
+          //   "Talk about Bea, ask questions about the procedural syntax, or follow the transpiler's development. It's the best place to get help or share what you've built.",
+          //   html.a([class("btn btn-primary"), href(links.discord)], [html.text("Join the Discord")]),
+          // ),
+          way(
+            "Report what breaks",
+            "Found code that doesn't compile, a confusing error, or a formatter that refuses your file? Open an issue with the smallest <code>.bea</code> file that shows it. <code>bea transpile file.bea</code> output helps a lot.",
+            html.a([class("btn"), href(links.issues)], [
+              html.text("Open an issue"),
+            ]),
+          ),
+          way(
+            "Contribute to the compiler",
+            "The compiler is written in Bea: lexer, parser, deriving, lowering, code generation, formatter and language server, each in its own module, with tests in Gleam. Build it with <code>bea build</code>, test it with <code>bea test</code>. Pick something from the issues or bring a proposal.",
+            html.a([class("btn"), href(links.repo)], [
+              html.text("Browse the source"),
+            ]),
+          ),
+          way(
+            "Add to the examples",
+            "The first six chapters of the tour are built from <code>beacode/</code>, Bea solutions to the Gleam exercism track. A new solution there becomes a new lesson here.",
+            html.a(
+              [class("btn"), href(links.repo <> "/tree/main/beacode")],
+              [html.text("See beacode")],
+            ),
+          ),
+          way(
+            "Improve this site",
+            "This site is a Bea project too: Lustre views written in Bea, rendered on Node, with the browser parts compiled to JavaScript. Fixes to the tour notes are as welcome as fixes to the code.",
+            html.a([class("btn"), href(links.site_repo)], [
+              html.text("Site source"),
+            ]),
+          ),
+        ]),
+        html.section(
+          [class("editors"), attribute.aria_labelledby("editors-title")],
+          [
+            html.div([class("prose")], [
+              html.h2([id("editors-title")], [html.text("Set up your editor")]),
+              markup.p(
+                "<code>bea lsp</code> runs Gleam's language server on the generated code and maps every position back to your <code>.bea</code> files: diagnostics, hover, completion, go to definition, rename and formatting. The VS Code extension lives in <a href=\"" <> links.repo <> "/tree/main/editors/vscode\"><code>editors/vscode</code></a>.",
+              ),
+            ]),
+            code.tabs(
+              "editors",
+              [
+                code.tab("Neovim", Text, neovim),
+                code.tab("Helix", Toml, helix),
+              ],
+              caption: "Editor setup",
+              actions: [],
+              extra_class: "",
+            ),
+          ],
+        ),
+        html.section([class("cousins-small")], [
+          html.img([
+            attribute.src("../assets/beatrix.svg"),
+            attribute.alt(""),
+            attribute.width(72),
+            attribute.height(72),
+          ]),
+          html.p([], [
+            html.text(
+              "Beatrix the black hole is Bea's mascot, and a cousin of Gleam's Lucy. Use her when you write or talk about Bea.",
+            ),
+          ]),
+        ]),
+      ]),
+    ],
+    modules: [],
+  )
+}
+
+def way(title: String, text: String, action: Element(msg)) -> Element(msg) {
+  html.section([class("way")], [
+    html.h2([], [html.text(title)]),
+    markup.p(text),
+    action,
+  ])
+}
+
+const neovim = `vim.filetype.add({ extension = { bea = "bea" } })
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "bea",
+  callback = function(args)
+    vim.lsp.start({
+      name = "bea",
+      cmd = { "bea", "lsp" },
+      root_dir = vim.fs.root(args.buf, { "bea.toml" }),
+    })
+  end,
+})`
+
+const helix = `[[language]]
+name = "bea"
+scope = "source.bea"
+file-types = ["bea"]
+roots = ["bea.toml"]
+language-servers = ["bea-lsp"]
+comment-token = "//"
+
+[language-server.bea-lsp]
+command = "bea"
+args = ["lsp"]`

@@ -1,0 +1,26 @@
+//// Reading the site's content (content/, assets/) at build time. A missing
+//// file stops the build with its path: run scripts/sync-examples.sh.
+
+import simplifile
+
+pub def read(path: String) -> String {
+  case simplifile.read("content/" <> path) {
+    Ok(text) -> text
+    Error(error) -> {
+      // (Bound first: `panic as "…#{x}"` generates `panic as "…" <> x`,
+      // which Gleam reads as `(panic as "…") <> x`. See bea_research.md.)
+      message = "can't read content/#{path} (#{simplifile.describe_error(error)}); run scripts/sync-examples.sh?"
+      panic as message
+    }
+  }
+}
+
+pub def exists(path: String) -> Bool {
+  simplifile.is_file("content/" <> path) == Ok(True)
+}
+
+pub def asset(path: String) -> String {
+  message = "can't read assets/#{path}"
+  Ok(text) = simplifile.read("assets/" <> path) else panic as message
+  text
+}

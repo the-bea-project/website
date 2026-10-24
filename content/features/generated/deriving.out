@@ -1,0 +1,6 @@
+src/deriving.bea:23
+User("Ada", 36, ["admin"], Some(Address("1 Hive Lane", "Kanpur")))
+src/deriving.bea:29
+UnableToDecode([DecodeError("Int", "String", ["age"]), DecodeError("Field", "Nothing", ["tags"])])
+src/deriving.bea:30
+"{\"name\":\"Ada\",\"age\":36,\"tags\":[\"admin\"],\"address\":null}"

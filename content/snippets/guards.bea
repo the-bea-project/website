@@ -1,0 +1,17 @@
+pub type Order { item: String, quantity: Int }
+
+pub def parse_order(form: Dict(String, String)) -> Result(Order, String) {
+  Ok(item) = dict.get(form, "item") else Error("pick something")
+  Ok(text) = dict.get(form, "quantity") else Error("how many?")
+  quantity = int.parse(text)? else _ -> Error("#{text} is not a number")
+  quantity > 0 else Error("at least one, please")
+  Ok(Order(item:, quantity:))
+}
+
+pub def main() {
+  echo [
+    parse_order(dict.from_list([("item", "honey"), ("quantity", "2")])),
+    parse_order(dict.from_list([("item", "honey"), ("quantity", "lots")])),
+    parse_order(dict.from_list([("quantity", "1")])),
+  ]
+}

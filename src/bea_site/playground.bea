@@ -1,0 +1,462 @@
+//// The playground: Bea's compiler, compiled to JavaScript with this site,
+//// transpiling as you type.
+////
+//// This module is the part the build and the browser share: the model,
+//// the messages, compiling, and the view. The build renders the view once
+//// with the first example, so the page has real compiler output before any
+//// JavaScript runs; `bea_site/browser/playground` then starts the same
+//// view as a Lustre application.
+
+import bea/codegen
+import bea/compiler
+import bea/diagnostic
+import bea/formatter
+import bea_site/code
+import bea_site/examples.{type Example}
+import bea_site/highlight
+import bea_site/layout.{type Page, Page}
+import bea_site/markup
+import gleam/dynamic/decode.{type Decoder}
+import gleam/json
+import lustre/attribute.{class, id}
+import lustre/element.{type Element}
+import lustre/element/html
+import lustre/event
+
+pub type Model {
+  /// The code in the editor, as typed.
+  source: String,
+  /// The code the program last put in the editor (an example, the
+  /// formatter's output). The editor's text belongs to the browser while you
+  /// type; the app only replaces it, through an effect.
+  loaded: String,
+  output: Output,
+  examples: List(Example),
+  /// The example in the picker, "" once the code is edited or shared.
+  selected: String,
+  format_label: String,
+  share_label: String,
+  /// Counts edits, so only the last of a burst of keystrokes compiles.
+  edits: Int,
+  /// After Esc, Tab moves the focus out of the editor instead of indenting.
+  escaped: Bool,
+  scroll_top: Float,
+  scroll_left: Float,
+}
+
+pub type Output {
+  Generated(gleam: String, ms: Int)
+  Failed(diagnostics: String, count: Int)
+}
+
+pub type Msg {
+  Edited(text: String)
+  /// Compile, if nothing was typed since edit number `edits`.
+  CompileAfter(edits: Int)
+  /// Tab, Enter and friends: the new text and selection.
+  Replaced(text: String, start: Int, end: Int)
+  Escaped(Bool)
+  Scrolled(top: Float, left: Float)
+  Picked(slug: String)
+  FormatClicked
+  ShareClicked
+  Shared(label: String)
+  LabelsReset
+}
+
+pub def model(
+  source: String,
+  selected: String,
+  examples: List(Example),
+  output: Output,
+) -> Model {
+  Model(
+    source:,
+    loaded: source,
+    output:,
+    examples:,
+    selected:,
+    format_label: "Format",
+    share_label: "Copy link",
+    edits: 0,
+    escaped: False,
+    scroll_top: 0.0,
+    scroll_left: 0.0,
+  )
+}
+
+// --- The compiler -------------------------------------------------------------------------
+
+/// Bea to Gleam, or the diagnostics as the CLI prints them (without colour).
+pub def transpile(source: String) -> Result(String, String) {
+  case compiler.compile(source, codegen.empty_context()) {
+    Ok(compiled) -> Ok(compiled.gleam)
+    Error(errors) ->
+      Error(diagnostic.render_all(errors, "playground.bea", source, False))
+  }
+}
+
+/// Bea's formatter, as `bea format`.
+pub def format(source: String) -> Result(String, String) {
+  formatter.format(source)
+  |> result.map_error(diagnostic.render_all(_, "playground.bea", source, False))
+}
+
+pub def output(result: Result(String, String), ms: Int) -> Output {
+  case result {
+    Ok(gleam) -> Generated(gleam, ms)
+    Error(text) -> {
+      count =
+        string.split(text, "\n") |> list.count(string.starts_with(_, "error:"))
+      Failed(string.trim(text), int.max(count, 1))
+    }
+  }
+}
+
+// --- Editing keys ---------------------------------------------------------------------------
+
+type Key {
+  key: String,
+  shift: Bool,
+  alt: Bool,
+  ctrl: Bool,
+  meta: Bool,
+  start: Int,
+  end: Int,
+  value: String,
+}
+
+def key_decoder() -> Decoder(Key) {
+  use key <- decode.field("key", decode.string)
+  use shift <- decode.field("shiftKey", decode.bool)
+  use alt <- decode.field("altKey", decode.bool)
+  use ctrl <- decode.field("ctrlKey", decode.bool)
+  use meta <- decode.field("metaKey", decode.bool)
+  use start <- decode.subfield(["target", "selectionStart"], decode.int)
+  use end <- decode.subfield(["target", "selectionEnd"], decode.int)
+  use value <- decode.subfield(["target", "value"], decode.string)
+  decode.success(Key(key:, shift:, alt:, ctrl:, meta:, start:, end:, value:))
+}
+
+/// What a key does in the editor. Keys it doesn't handle dispatch nothing.
+def on_key(escaped: Bool) -> attribute.Attribute(Msg) {
+  event.advanced(
+    "keydown",
+    {
+      use k <- decode.then(key_decoder())
+      take = fn(msg) {
+        decode.success(
+          event.handler(msg, prevent_default: True, stop_propagation: False),
+        )
+      }
+      pass = fn(msg) {
+        decode.success(
+          event.handler(msg, prevent_default: False, stop_propagation: False),
+        )
+      }
+      plain = not k.ctrl and not k.meta and not k.alt
+      cond {
+        k.key == "Escape" -> pass(Escaped(True))
+        k.key == "Tab" and not escaped and plain -> take(indent(k))
+        k.key == "Enter" and not k.shift and not k.ctrl and not k.meta ->
+          take(newline(k))
+        {
+          k.key == "F" or k.key == "f"
+        } and k.shift and k.alt -> take(FormatClicked)
+        escaped -> pass(Escaped(False))
+        _ ->
+          decode.failure(
+            event.handler(
+              Escaped(False),
+              prevent_default: False,
+              stop_propagation: False,
+            ),
+            "a key the editor leaves alone",
+          )
+      }
+    },
+  )
+}
+
+/// Tab indents by two spaces; Shift+Tab takes up to two off the line.
+def indent(k: Key) -> Msg {
+  line_start = line_start(k.value, k.start)
+  if not k.shift {
+    return replace(k.value, k.start, k.end, "  ", k.start + 2, k.start + 2)
+  }
+  line = string.drop_start(k.value, line_start)
+  strip = if string.starts_with(line, "  ") {
+    2
+  } else if string.starts_with(line, " ") {
+    1
+  } else {
+    0
+  }
+  replace(
+    k.value,
+    line_start,
+    line_start + strip,
+    "",
+    int.max(line_start, k.start - strip),
+    int.max(line_start, k.end - strip),
+  )
+}
+
+/// Enter keeps the line's indentation, one level deeper after an opening
+/// bracket or an arrow.
+def newline(k: Key) -> Msg {
+  start = line_start(k.value, k.start)
+  line = slice(k.value, start, k.start)
+  indent = string.length(line) - string.length(string.trim_start(line))
+  indent = string.repeat(" ", indent)
+  before = string.trim_end(line)
+  deeper = list.any(["{", "(", "[", "->"], string.ends_with(before, _))
+  indent = if deeper {
+    indent <> "  "
+  } else {
+    indent
+  }
+  text = "\n" <> indent
+  cursor = k.start + string.length(text)
+  replace(k.value, k.start, k.end, text, cursor, cursor)
+}
+
+def replace(
+  value: String,
+  from: Int,
+  to: Int,
+  text: String,
+  start: Int,
+  end: Int,
+) -> Msg {
+  Replaced(
+    slice(value, 0, from) <> text <> string.drop_start(value, to),
+    start,
+    end,
+  )
+}
+
+def slice(value: String, from: Int, to: Int) -> String {
+  string.slice(value, from, to - from)
+}
+
+/// Where the line holding `position` starts.
+def line_start(value: String, position: Int) -> Int {
+  before = slice(value, 0, position)
+  case string.split(before, "\n") |> list.last {
+    Ok(last) -> position - string.length(last)
+    Error(_) -> 0
+  }
+}
+
+// --- View -------------------------------------------------------------------------------------
+
+pub def view(model: Model) -> Element(Msg) {
+  html.div([class("pg")], [
+    html.div([class("pg-bar")], [
+      html.div([class("pg-title")], [
+        html.h1([], [html.text("Playground")]),
+        html.p([], [
+          html.text(
+            "Bea's compiler, running in your browser. Nothing is sent anywhere.",
+          ),
+        ]),
+      ]),
+      html.div([class("pg-tools")], [
+        html.label([class("pg-select")], [
+          html.span([class("visually-hidden")], [html.text("Load an example")]),
+          picker(model),
+        ]),
+        html.button(
+          [
+            class("btn btn-small"),
+            attribute.type_("button"),
+            id("pg-format"),
+            attribute.title("Format (Shift+Alt+F)"),
+            event.on_click(FormatClicked),
+          ],
+          [html.text(model.format_label)],
+        ),
+        html.button(
+          [
+            class("btn btn-small"),
+            attribute.type_("button"),
+            id("pg-share"),
+            event.on_click(ShareClicked),
+          ],
+          [html.text(model.share_label)],
+        ),
+      ]),
+    ]),
+    html.div([class("pg-panes")], [editor(model), output_pane(model.output)]),
+    markup.raw(
+      "p",
+      [class("pg-note")],
+      "The playground turns Bea into Gleam and reports Bea's syntax errors. Type checking and running happen in Gleam, so <a href=\"../toolchain/\">install Bea</a> to run programs. The compiler here is Bea's own, compiled from its Bea source to JavaScript along with this site.",
+    ),
+  ])
+}
+
+def picker(model: Model) -> Element(Msg) {
+  groups =
+    model.examples
+    |> list.map(fn(e) { e.group })
+    |> list.unique
+    |> list.map(fn(group) {
+      html.optgroup(
+        [attribute.attribute("label", group)],
+        model.examples
+        |> list.filter(fn(e) { e.group == group })
+        |> list.map(fn(e) {
+          html.option(
+            [
+              attribute.value(e.slug),
+              attribute.selected(e.slug == model.selected),
+            ],
+            e.title,
+          )
+        }),
+      )
+    })
+  html.select([id("pg-example"), event.on_change(Picked)], [
+    html.option(
+      [attribute.value(""), attribute.selected(model.selected == "")],
+      "Load an example…",
+    ) |
+    groups
+  ])
+}
+
+def editor(model: Model) -> Element(Msg) {
+  html.section(
+    [class("pg-pane"), attribute.aria_label("Bea source")],
+    [
+      html.div([class("pg-pane-head")], [
+        html.span([], [html.text("main.bea")]),
+        html.span([class("pg-hint")], [
+          html.text("Tab indents. Esc, then Tab, leaves the editor."),
+        ]),
+      ]),
+      html.div([class("editor")], [
+        // The highlighted copy under the transparent textarea. The extra
+        // newline keeps its height in step with the textarea's.
+        html.pre(
+          [
+            class("editor-hl"),
+            attribute.aria_hidden(True),
+            attribute.property("scrollTop", json.float(model.scroll_top)),
+            attribute.property("scrollLeft", json.float(model.scroll_left)),
+          ],
+          [
+            html.code(
+              [class("lang-bea")],
+              list.append(highlight.view(model.source, highlight.Bea), [
+                html.text("\n"),
+              ]),
+            ),
+          ],
+        ),
+        element.element(
+          "textarea",
+          [
+            id("pg-input"),
+            attribute.spellcheck(False),
+            attribute.autocapitalize("off"),
+            attribute.autocomplete("off"),
+            attribute.attribute("autocorrect", "off"),
+            attribute.aria_label("Bea source code"),
+            event.on_input(Edited),
+            on_key(model.escaped),
+            event.on(
+              "scroll",
+              {
+                use top <- decode.subfield(
+                  ["target", "scrollTop"],
+                  decode.float,
+                )
+                use left <- decode.subfield(
+                  ["target", "scrollLeft"],
+                  decode.float,
+                )
+                decode.success(Scrolled(top, left))
+              },
+            ),
+          ],
+          [html.text(model.loaded)],
+        ),
+      ]),
+    ],
+  )
+}
+
+def output_pane(output: Output) -> Element(Msg) {
+  (status, failed, body) = case output {
+    Generated(gleam, ms) ->
+      (
+        "Generated in #{int.to_string(ms)} ms",
+        False,
+        highlight.view(string.trim_end(gleam), highlight.Gleam),
+      )
+    Failed(text, 1) -> ("1 error", True, [html.text(text)])
+    Failed(text, n) -> ("#{int.to_string(n)} errors", True, [html.text(text)])
+  }
+  html.section(
+    [class("pg-pane pg-out"), attribute.aria_label("Generated Gleam")],
+    [
+      html.div([class("pg-pane-head")], [
+        html.span([id("pg-out-label")], [html.text("main.gleam")]),
+        html.span(
+          [
+            attribute.classes([("pg-status", True), ("err", failed)]),
+            id("pg-status"),
+            attribute.role("status"),
+          ],
+          [html.text(status)],
+        ),
+        code.copy_button(),
+      ]),
+      html.pre(
+        [
+          attribute.classes([("pg-output", True), ("err", failed)]),
+          attribute.tabindex(0),
+        ],
+        [html.code([class("lang-gleam"), id("pg-output")], body)],
+      ),
+    ],
+  )
+}
+
+// --- The page --------------------------------------------------------------------------------
+
+/// The playground page, showing the first example and its Gleam.
+pub def page(examples: List(Example)) -> Page(Msg) {
+  first = case examples {
+    [first | _] -> first.code
+    [] -> "pub def main() {\n  echo \"Hello from Bea\"\n}\n"
+  }
+  initial = model(first, "", examples, output(transpile(first), 1))
+  // `</` can't appear inside a script element.
+  data = examples.to_json(examples) |> string.replace("</", "<\\/")
+  Page(
+    title: "Playground",
+    description: "Write Bea and see the Gleam it compiles to, live in your browser, with Bea's own compiler.",
+    root: "../",
+    active: "playground",
+    body_class: "playground",
+    body: [
+      html.div([id("pg-app")], [view(initial)]),
+      html.script(
+        [attribute.type_("application/json"), id("pg-examples")],
+        data,
+      ),
+      html.noscript([], [
+        markup.raw(
+          "p",
+          [class("wrap")],
+          "The playground needs JavaScript to follow your edits. The <a href=\"../tour/\">tour</a> shows every example with its Gleam and output, no JavaScript required.",
+        ),
+      ]),
+    ],
+    modules: ["playground"],
+  )
+}

@@ -1,0 +1,602 @@
+//// Functions reached through their type: `Credentials.decoder()`.
+////
+//// Bea names the functions that belong to a type `<type>_<name>`:
+//// `@derive(decoder)` on `Credentials` defines `credentials_decoder`, and a
+//// decoder written by hand for a union goes by the same name. `Type.name`
+//// is that function, reached through the type instead of spelled out:
+////
+//// ```bea
+//// Credentials.decoder()           // credentials_decoder()
+//// Page.decoder(User.decoder())    // page_decoder(user_decoder())
+//// auth.Credentials.decoder()      // auth.credentials_decoder()
+//// ```
+////
+//// With `import app/auth.{type Credentials}`, `Credentials.decoder()` is
+//// `auth.credentials_decoder()`: importing a type brings its functions
+//// along, whatever the module is called here.
+////
+//// This is naming, resolved before lowering: the Gleam is the same as if
+//// the function had been written out, so Gleam code and other packages
+//// call `credentials_decoder` as before. There are no methods on values
+//// (`creds.encode()` would need the type of `creds`, which only Gleam
+//// knows), and nothing is looked up at run time.
+
+import bea/ast.{type Expr, type Item, type Statement}
+import bea/codegen
+import bea/deriving
+import bea/diagnostic.{type Diagnostic}
+import bea/span.{type Span}
+import gleam/dict.{type Dict}
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/set.{type Set}
+import gleam/string
+
+type Env {
+  Env(
+    /// The module's own types.
+    types: Set(String),
+    /// Constructor -> its type, for the module's own types.
+    constructors: Dict(String, String),
+    /// Unqualified imported types: local name -> (module qualifier, name in
+    /// that module).
+    imported_types: Dict(String, (String, String)),
+    /// The functions and constants the module defines (derived ones too).
+    values: Set(String),
+    /// Imported modules, by qualifier.
+    modules: Set(String),
+  )
+}
+
+/// Resolves every `Type.name` of a module to the function it names.
+/// `module` is the module after `@derive` added its functions; `source`
+/// is the one it came from, whose `@derive`s count as defining their
+/// functions even when deriving failed (the error is about that, not
+/// about the call).
+pub def module(
+  module: ast.Module,
+  source: ast.Module,
+) -> (ast.Module, List(Diagnostic)) {
+  env = env(module)
+  env = Env(
+    env |
+    values: list.fold(source.items, env.values, fn(acc, it) {
+      case it {
+        ast.CustomType(name:, attributes: | _) ->
+          list.fold(codegen.derivers(attributes), acc, fn(acc, d) {
+            set.insert(acc, deriving.function_name(name, d))
+          })
+        _ -> acc
+      }
+    }),
+  )
+  (items, errors) = list.fold(module.items, ([], []), fn(acc, it) {
+    (it, errors) = item(env, it, acc.1)
+    ([it | acc.0], errors)
+  })
+  resolved = ast.Module(module | items: list.reverse(items))
+  (drop_unused_types(module, resolved), list.reverse(errors))
+}
+
+def env(module: ast.Module) -> Env {
+  empty = Env(set.new(), dict.new(), dict.new(), set.new(), set.new())
+  list.fold(module.items, empty, fn(env, it) {
+    case it {
+      ast.CustomType(name:, variants: | _) ->
+        Env(
+          env |
+          types: set.insert(env.types, name),
+          constructors: list.fold(variants, env.constructors, fn(acc, v) {
+            dict.insert(acc, v.name, name)
+          }),
+        )
+      ast.TypeAlias(name: | _) | ast.ExternalType(name: | _) ->
+        Env(env | types: set.insert(env.types, name))
+      ast.Function(name: | _) | ast.Const(name: | _) ->
+        Env(env | values: set.insert(env.values, name))
+      ast.Import(module: path, alias:, unqualified: | _) -> {
+        qualifier = case alias {
+          Some((a, _)) -> a
+          None -> last_segment(path)
+        }
+        imported_types = list.fold(unqualified, env.imported_types, fn(acc, u) {
+          case u.is_type {
+            True ->
+              dict.insert(
+                acc,
+                option.unwrap(u.alias, u.name),
+                (qualifier, u.name),
+              )
+            False -> acc
+          }
+        })
+        Env(env | imported_types:, modules: set.insert(env.modules, qualifier))
+      }
+    }
+  })
+}
+
+def last_segment(path: String) -> String {
+  case string.split(path, "/") |> list.last {
+    Ok(s) -> s
+    Error(_) -> path
+  }
+}
+
+/// An unqualified type import that only `Type.name` used is no longer used
+/// by the Gleam: drop it, or Gleam warns. One that wasn't used to begin
+/// with stays, for Gleam to warn about as usual.
+def drop_unused_types(before: ast.Module, after: ast.Module) -> ast.Module {
+  used = fn(m) {
+    codegen.references(m).unqualified
+    |> set.filter(fn(u) { u.0 })
+    |> set.map(fn(u) { u.1 })
+  }
+  dropped = set.difference(used(before), used(after))
+  case set.is_empty(dropped) {
+    True -> after
+    False ->
+      ast.Module(
+        after |
+        items: list.map(after.items, fn(it) {
+          case it {
+            ast.Import(unqualified: | _) ->
+              ast.Import(
+                it |
+                unqualified: list.filter(unqualified, fn(u) {
+                  not u.is_type or not set.contains(
+                    dropped,
+                    option.unwrap(u.alias, u.name),
+                  )
+                }),
+              )
+            _ -> it
+          }
+        }),
+      )
+  }
+}
+
+// --- Resolution --------------------------------------------------------------------
+
+/// `Type.name` (`module` is the type's qualifier, if any) as the function it
+/// names, or why it doesn't name one.
+def resolve(
+  env: Env,
+  scope: Set(String),
+  s: Span,
+  type_span: Span,
+  module: Option(String),
+  type_name: String,
+  name: String,
+  name_span: Span,
+) -> Result(Expr, Diagnostic) {
+  written = type_name <> "." <> name
+  case module {
+    // `auth.Credentials.decoder()`: the module says where it is.
+    Some(q) ->
+      Ok(
+        ast.FieldAccess(
+          s,
+          ast.Var(type_span, q),
+          deriving.function_name(type_name, name),
+          name_span,
+        ),
+      )
+    None -> case set.contains(env.types, type_name), dict.get(
+      env.imported_types,
+      type_name,
+    ) {
+      True, _ -> {
+        f = deriving.function_name(type_name, name)
+        case set.contains(env.values, f), set.contains(scope, f) {
+          True, False -> Ok(ast.Var(s, f))
+          True, True ->
+            Error(
+              diagnostic.error(
+                "Shadowed function",
+                s,
+                "`" <> written <> "` is `" <> f <> "`, and a variable called `" <> f <> "` hides it here",
+              )
+              |> diagnostic.with_hint("Rename the variable."),
+            )
+          False, _ -> Error(missing(env, s, type_name, name, f))
+        }
+      }
+      False, Ok((q, original)) -> case set.contains(scope, q) {
+        False ->
+          Ok(
+            ast.FieldAccess(
+              s,
+              ast.Var(type_span, q),
+              deriving.function_name(original, name),
+              name_span,
+            ),
+          )
+        True ->
+          Error(
+            diagnostic.error(
+              "Shadowed module",
+              s,
+              "`" <> type_name <> "` comes from the module `" <> q <> "`, and a variable called `" <> q <> "` hides it here",
+            )
+            |> diagnostic.with_hint("Rename the variable."),
+          )
+      }
+      False, Error(_) -> Error(not_a_type(env, type_span, type_name, name))
+    }
+  }
+}
+
+def missing(
+  env: Env,
+  s: Span,
+  type_name: String,
+  name: String,
+  f: String,
+) -> Diagnostic {
+  hint = case set.contains(env.modules, name) {
+    True ->
+      "Add `@derive(" <> name <> ")` to `" <> type_name <> "`, or define `" <> f <> "` in this module."
+    False -> "Define `" <> f <> "` in this module."
+  }
+  diagnostic.error(
+    "Unknown function",
+    s,
+    "`" <> type_name <> "` has no `" <> name <> "`: this module defines no `" <> f <> "`",
+  )
+  |> diagnostic.with_hint(hint)
+}
+
+def not_a_type(
+  env: Env,
+  s: Span,
+  type_name: String,
+  name: String,
+) -> Diagnostic {
+  case dict.get(env.constructors, type_name) {
+    Ok(t) ->
+      diagnostic.error(
+        "Not a type",
+        s,
+        "`" <> type_name <> "` is a constructor of `" <> t <> "`",
+      )
+      |> diagnostic.with_hint(
+        "Functions belong to the type: `" <> t <> "." <> name <> "`.",
+      )
+    Error(_) -> {
+      std = deriving.snake_case(type_name)
+      hint = case list.key_find(codegen.std_modules, std) {
+        Ok(_) ->
+          "The standard library's functions for `" <> type_name <> "` are in its module: `" <> std <> "." <> name <> "`."
+        Error(_) ->
+          "Import it (`import some/module.{type " <> type_name <> "}`), or name its module: `module." <> type_name <> "." <> name <> "`."
+      }
+      diagnostic.error(
+        "Unknown type",
+        s,
+        "`" <> type_name <> "` is not a type of this module, or one imported with `{type " <> type_name <> "}`",
+      )
+      |> diagnostic.with_hint(hint)
+    }
+  }
+}
+
+// --- Walking the module (scope aware) ----------------------------------------------
+
+type Errors = List(Diagnostic)
+
+def item(env: Env, it: Item, errors: Errors) -> (Item, Errors) {
+  case it {
+    ast.Function(clauses: | _) -> {
+      (clauses, errors) = map(clauses, errors, fn(c, errors) {
+        scope = list.fold(c.params, set.new(), fn(s, p) {
+          codegen.bind(s, p.pattern)
+        })
+        (guard, errors) = opt_expr(env, scope, c.guard, errors)
+        (body, errors) = case c.body {
+          Some(body) -> {
+            (body, errors) = stmts(env, scope, body, errors)
+            (Some(body), errors)
+          }
+          None -> (None, errors)
+        }
+        (ast.Clause(c | guard:, body:), errors)
+      })
+      (ast.Function(it | clauses:), errors)
+    }
+    ast.Const(value: | _) -> {
+      (value, errors) = expr(env, set.new(), value, errors)
+      (ast.Const(it | value:), errors)
+    }
+    _ -> (it, errors)
+  }
+}
+
+def map(
+  xs: List(a),
+  errors: Errors,
+  f: fn(a, Errors) -> (b, Errors),
+) -> (List(b), Errors) {
+  (ys, errors) = list.fold(xs, ([], errors), fn(acc, x) {
+    (y, errors) = f(x, acc.1)
+    ([y | acc.0], errors)
+  })
+  (list.reverse(ys), errors)
+}
+
+def stmts(
+  env: Env,
+  scope: Set(String),
+  statements: List(Statement),
+  errors: Errors,
+) -> (List(Statement), Errors) {
+  case statements {
+    [] -> ([], errors)
+    [statement | rest] -> {
+      (statement, scope, errors) = stmt(env, scope, statement, errors)
+      (rest, errors) = stmts(env, scope, rest, errors)
+      ([statement | rest], errors)
+    }
+  }
+}
+
+/// A statement, and the scope of the statements after it.
+def stmt(
+  env: Env,
+  scope: Set(String),
+  statement: Statement,
+  errors: Errors,
+) -> (Statement, Set(String), Errors) {
+  case statement {
+    ast.Assign(s, p, t, v) -> {
+      (v, errors) = expr(env, scope, v, errors)
+      (ast.Assign(s, p, t, v), codegen.bind(scope, p), errors)
+    }
+    ast.Expression(e) -> {
+      (e, errors) = expr(env, scope, e, errors)
+      (ast.Expression(e), scope, errors)
+    }
+    ast.Return(s, e) -> {
+      (e, errors) = expr(env, scope, e, errors)
+      (ast.Return(s, e), scope, errors)
+    }
+    ast.Use(s, ps, call) -> {
+      (call, errors) = expr(env, scope, call, errors)
+      scope = list.fold(ps, scope, fn(s, p) { codegen.bind(s, p.pattern) })
+      (ast.Use(s, ps, call), scope, errors)
+    }
+    ast.Assert(s, v, m) -> {
+      (v, errors) = expr(env, scope, v, errors)
+      (m, errors) = opt_expr(env, scope, m, errors)
+      (ast.Assert(s, v, m), scope, errors)
+    }
+    ast.Guard(s, p, t, v, otherwise) -> {
+      (v, errors) = expr(env, scope, v, errors)
+      else_scope = case otherwise.binding {
+        Some(b) -> codegen.bind(scope, b)
+        None -> scope
+      }
+      (body, errors) = stmts(env, else_scope, otherwise.body, errors)
+      scope = case p {
+        Some(p) -> codegen.bind(scope, p)
+        None -> scope
+      }
+      (ast.Guard(s, p, t, v, ast.Otherwise(otherwise | body:)), scope, errors)
+    }
+  }
+}
+
+def opt_expr(
+  env: Env,
+  scope: Set(String),
+  e: Option(Expr),
+  errors: Errors,
+) -> (Option(Expr), Errors) {
+  case e {
+    Some(e) -> {
+      (e, errors) = expr(env, scope, e, errors)
+      (Some(e), errors)
+    }
+    None -> (None, errors)
+  }
+}
+
+def exprs(
+  env: Env,
+  scope: Set(String),
+  es: List(Expr),
+  errors: Errors,
+) -> (List(Expr), Errors) {
+  map(es, errors, fn(e, errors) { expr(env, scope, e, errors) })
+}
+
+def args(
+  env: Env,
+  scope: Set(String),
+  args: List(ast.Arg),
+  errors: Errors,
+) -> (List(ast.Arg), Errors) {
+  map(args, errors, fn(a, errors) {
+    (value, errors) = opt_expr(env, scope, a.value, errors)
+    (ast.Arg(a | value:), errors)
+  })
+}
+
+def case_clauses(
+  env: Env,
+  scope: Set(String),
+  clauses: List(ast.CaseClause),
+  errors: Errors,
+) -> (List(ast.CaseClause), Errors) {
+  map(clauses, errors, fn(c, errors) {
+    inner = list.fold(c.alternatives, scope, fn(s, alt) {
+      list.fold(alt, s, codegen.bind)
+    })
+    (guard, errors) = opt_expr(env, inner, c.guard, errors)
+    (body, errors) = expr(env, inner, c.body, errors)
+    (ast.CaseClause(c | guard:, body:), errors)
+  })
+}
+
+def expr(
+  env: Env,
+  scope: Set(String),
+  e: Expr,
+  errors: Errors,
+) -> (Expr, Errors) {
+  go = fn(x, errors) { expr(env, scope, x, errors) }
+  case e {
+    ast.FieldAccess(s, ast.Constructor(ts, module, type_name), name, ns) -> case resolve(
+      env,
+      scope,
+      s,
+      ts,
+      module,
+      type_name,
+      name,
+      ns,
+    ) {
+      Ok(resolved) -> (resolved, errors)
+      Error(error) -> (e, [error | errors])
+    }
+
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) | ast.Hole(| _) ->
+      (e, errors)
+
+    ast.String(s, parts) -> {
+      (parts, errors) = map(parts, errors, fn(p, errors) {
+        case p {
+          ast.Interpolation(x, ps) -> {
+            (x, errors) = go(x, errors)
+            (ast.Interpolation(x, ps), errors)
+          }
+          ast.Text(| _) -> (p, errors)
+        }
+      })
+      (ast.String(s, parts), errors)
+    }
+    ast.FieldAccess(s, b, f, fs) -> {
+      (b, errors) = go(b, errors)
+      (ast.FieldAccess(s, b, f, fs), errors)
+    }
+    ast.TupleIndex(s, b, i) -> {
+      (b, errors) = go(b, errors)
+      (ast.TupleIndex(s, b, i), errors)
+    }
+    ast.Call(s, f, call_args) -> {
+      (f, errors) = go(f, errors)
+      (call_args, errors) = args(env, scope, call_args, errors)
+      (ast.Call(s, f, call_args), errors)
+    }
+    ast.RecordUpdate(s, c, b, updates) -> {
+      (c, errors) = go(c, errors)
+      (b, errors) = go(b, errors)
+      (updates, errors) = args(env, scope, updates, errors)
+      (ast.RecordUpdate(s, c, b, updates), errors)
+    }
+    ast.Tuple(s, es) -> {
+      (es, errors) = exprs(env, scope, es, errors)
+      (ast.Tuple(s, es), errors)
+    }
+    ast.List(s, es, tail) -> {
+      (es, errors) = exprs(env, scope, es, errors)
+      (tail, errors) = opt_expr(env, scope, tail, errors)
+      (ast.List(s, es, tail), errors)
+    }
+    ast.Map(s, base, pairs) -> {
+      (base, errors) = opt_expr(env, scope, base, errors)
+      (pairs, errors) = map(pairs, errors, fn(kv, errors) {
+        (k, errors) = go(kv.0, errors)
+        (v, errors) = go(kv.1, errors)
+        ((k, v), errors)
+      })
+      (ast.Map(s, base, pairs), errors)
+    }
+    ast.Fn(s, params, ret, body) -> {
+      inner = list.fold(params, scope, fn(acc, p) {
+        codegen.bind(acc, p.pattern)
+      })
+      (body, errors) = stmts(env, inner, body, errors)
+      (ast.Fn(s, params, ret, body), errors)
+    }
+    ast.FnClauses(s, clauses) -> {
+      (clauses, errors) = case_clauses(env, scope, clauses, errors)
+      (ast.FnClauses(s, clauses), errors)
+    }
+    ast.Block(s, statements) -> {
+      (statements, errors) = stmts(env, scope, statements, errors)
+      (ast.Block(s, statements), errors)
+    }
+    ast.If(s, c, then, else_) -> {
+      (c, errors) = go(c, errors)
+      (then, errors) = stmts(env, scope, then, errors)
+      (else_, errors) = case else_ {
+        Some(el) -> {
+          (el, errors) = stmts(env, scope, el, errors)
+          (Some(el), errors)
+        }
+        None -> (None, errors)
+      }
+      (ast.If(s, c, then, else_), errors)
+    }
+    ast.Cond(s, clauses) -> {
+      (clauses, errors) = map(clauses, errors, fn(c, errors) {
+        (condition, errors) = go(c.condition, errors)
+        (body, errors) = go(c.body, errors)
+        (ast.CondClause(c.span, condition, body), errors)
+      })
+      (ast.Cond(s, clauses), errors)
+    }
+    ast.Case(s, subjects, clauses) -> {
+      (subjects, errors) = exprs(env, scope, subjects, errors)
+      (clauses, errors) = case_clauses(env, scope, clauses, errors)
+      (ast.Case(s, subjects, clauses), errors)
+    }
+    ast.BinaryOp(s, op, l, r) -> {
+      (l, errors) = go(l, errors)
+      (r, errors) = go(r, errors)
+      (ast.BinaryOp(s, op, l, r), errors)
+    }
+    ast.Negate(s, x) -> {
+      (x, errors) = go(x, errors)
+      (ast.Negate(s, x), errors)
+    }
+    ast.NegateFloat(s, x) -> {
+      (x, errors) = go(x, errors)
+      (ast.NegateFloat(s, x), errors)
+    }
+    ast.Not(s, x) -> {
+      (x, errors) = go(x, errors)
+      (ast.Not(s, x), errors)
+    }
+    ast.Try(s, x) -> {
+      (x, errors) = go(x, errors)
+      (ast.Try(s, x), errors)
+    }
+    ast.Echo(s, x, m) -> {
+      (x, errors) = opt_expr(env, scope, x, errors)
+      (m, errors) = opt_expr(env, scope, m, errors)
+      (ast.Echo(s, x, m), errors)
+    }
+    ast.Panic(s, m) -> {
+      (m, errors) = opt_expr(env, scope, m, errors)
+      (ast.Panic(s, m), errors)
+    }
+    ast.Todo(s, m) -> {
+      (m, errors) = opt_expr(env, scope, m, errors)
+      (ast.Todo(s, m), errors)
+    }
+    ast.BitArray(s, segments) -> {
+      (segments, errors) = map(segments, errors, fn(seg, errors) {
+        (value, errors) = go(seg.value, errors)
+        (options, errors) = map(seg.options, errors, fn(o, errors) {
+          (arg, errors) = opt_expr(env, scope, o.arg, errors)
+          (ast.SegmentOption(o | arg:), errors)
+        })
+        (ast.Segment(seg.span, value, options), errors)
+      })
+      (ast.BitArray(s, segments), errors)
+    }
+  }
+}

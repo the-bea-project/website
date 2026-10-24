@@ -1,0 +1,31 @@
+//// `@derive` writes functions that follow a record's fields, like JSON
+//// decoders and encoders. What they do comes from a deriver: an ordinary
+//// module, here `bea_json/decoder` and `bea_json/encoder`.
+
+import bea_json/decoder
+import bea_json/encoder
+
+@derive(decoder, encoder)
+pub type Address { street: String, city: String }
+
+@derive(decoder, encoder)
+pub type User {
+  name: String,
+  age: Int,
+  tags: List(String),
+  address: Option(Address),
+}
+
+pub def main() {
+  json = `{"name": "Ada", "age": 36, "tags": ["admin"],
+    "address": {"street": "1 Hive Lane", "city": "Kanpur"}}`
+  Ok(user) = decoder.from_json(json, User.decoder()) else panic
+  echo user
+  // A field of the wrong type: the error says which one.
+  Error(problem) = decoder.from_json(
+    `{"name": "Bea", "age": "two"}`,
+    User.decoder(),
+  ) else panic
+  echo problem
+  echo encoder.to_string(User(user | address: None), User.encoder())
+}

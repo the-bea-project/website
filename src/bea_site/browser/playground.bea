@@ -1,0 +1,239 @@
+//// The playground in the browser: a Lustre application around the view in
+//// `bea_site/playground`, running Bea's compiler on every edit.
+
+import bea_site/examples.{type Example}
+import bea_site/playground.{
+  type Model,
+  type Msg,
+  CompileAfter,
+  Edited,
+  Escaped,
+  FormatClicked,
+  LabelsReset,
+  Model,
+  Picked,
+  Replaced,
+  Scrolled,
+  ShareClicked,
+  Shared,
+}
+import gleam/javascript/promise
+import lustre
+import lustre/effect.{type Effect}
+import plinth/browser/clipboard
+import plinth/browser/document
+import plinth/browser/element
+import plinth/browser/location
+import plinth/browser/web_storage
+import plinth/browser/window
+import plinth/javascript/date
+import plinth/javascript/global
+
+@external(javascript, "./ffi.mjs", "rescue")
+def rescue(f: fn() -> a) -> Result(a, String)
+
+@external(javascript, "./ffi.mjs", "replace_url")
+def replace_url(url: String) -> Nil
+
+const draft_key = "bea-playground"
+
+pub def main() -> Nil {
+  examples = case document.get_element_by_id("pg-examples") {
+    Ok(data) -> examples.from_json(element.text_content(data))
+    Error(_) -> []
+  }
+  (code, selected) = starting_code(examples)
+  // The page was rendered with the first example. Lustre takes over the
+  // editor and the picker as they are (and replays their input events), so
+  // they get the starting code first.
+  _ =
+    document.get_element_by_id("pg-input")
+    |> result.map(element.set_value(_, code))
+  _ =
+    document.get_element_by_id("pg-example")
+    |> result.map(element.set_value(_, selected))
+  app = lustre.application(init, update, playground.view)
+  _ = lustre.start(app, "#pg-app", (code, selected, examples))
+  Nil
+}
+
+/// A shared link's code, then `?example=`, then the last draft, then the
+/// first example.
+def starting_code(examples: List(Example)) -> (String, String) {
+  location = window.location(window.self())
+  shared =
+    location.hash(location)
+    |> result.try(fn(hash) {
+      // (plinth leaves out the `#`, and the `?` of the query below.)
+      "code=" <> encoded = hash else Error(Nil)
+      bit_array.base64_url_decode(encoded) |> result.try(bit_array.to_string)
+    })
+  asked =
+    location.search(location)
+    |> result.try(uri.parse_query)
+    |> result.try(list.key_find(_, "example"))
+    |> result.try(fn(slug) { list.find(examples, fn(e) { e.slug == slug }) })
+  draft =
+    web_storage.local()
+    |> result.replace_error(Nil)
+    |> result.try(fn(s) {
+      web_storage.get_item(s, draft_key) |> result.replace_error(Nil)
+    })
+    |> result.try(option.to_result(_, Nil))
+  cond {
+    result.is_ok(shared) -> (result.unwrap(shared, ""), "")
+    result.is_ok(asked) -> {
+      Ok(example) = asked else panic
+      (example.code, example.slug)
+    }
+    result.is_ok(draft) -> (result.unwrap(draft, ""), "")
+    _ -> case examples {
+      [first | _] -> (first.code, first.slug)
+      [] -> ("pub def main() {\n  echo \"Hello from Bea\"\n}\n", "")
+    }
+  }
+}
+
+def init(flags: (String, String, List(Example))) -> (Model, Effect(Msg)) {
+  (code, selected, examples) = flags
+  model = playground.model(
+    code,
+    selected,
+    examples,
+    playground.output(Ok(""), 0),
+  )
+  (compile(model), effect.none())
+}
+
+def compile(model: Model) -> Model {
+  started = date.get_time(date.now())
+  result = case rescue(fn() { playground.transpile(model.source) }) {
+    Ok(result) -> result
+    Error(crash) ->
+      Error(
+        "The compiler crashed on this input. Please report it with the code attached.\n\n" <> crash,
+      )
+  }
+  ms = int.max(1, date.get_time(date.now()) - started)
+  Model(model | output: playground.output(result, ms))
+}
+
+def update(model: Model, msg: Msg) -> (Model, Effect(Msg)) {
+  case msg {
+    // (Lustre replays the editor's input event when it starts.)
+    Edited(text) if text == model.source -> (model, effect.none())
+    Edited(text) -> edited(model, text)
+    Replaced(text, start, end) -> {
+      (model, effects) = edited(model, text)
+      (model, effect.batch([effects, put(text, Some((start, end)))]))
+    }
+    CompileAfter(edits) if edits == model.edits -> {
+      save_draft(model.source)
+      (compile(model), effect.none())
+    }
+    CompileAfter(_) -> (model, effect.none())
+    Escaped(escaped) -> (Model(model | escaped:), effect.none())
+    Scrolled(top, left) ->
+      (Model(model | scroll_top: top, scroll_left: left), effect.none())
+    Picked(slug) -> case list.find(model.examples, fn(e) { e.slug == slug }) {
+      Ok(example) -> {
+        replace_url("?example=" <> slug)
+        model = Model(
+          model |
+          source: example.code,
+          loaded: example.code,
+          selected: slug,
+          scroll_top: 0.0,
+          scroll_left: 0.0,
+        )
+        (compile(model), put(example.code, None))
+      }
+      Error(_) -> (model, effect.none())
+    }
+    FormatClicked -> case playground.format(model.source) {
+      Ok(text) if text == model.source ->
+        labelled(Model(model | format_label: "Formatted"))
+      Ok(text) -> {
+        model = compile(
+          Model(
+            model |
+            source: text,
+            loaded: text,
+            format_label: "Formatted",
+            edits: model.edits + 1,
+          ),
+        )
+        (model, effects) = labelled(model)
+        (model, effect.batch([effects, put(text, None)]))
+      }
+      Error(_) -> labelled(Model(model | format_label: "Fix errors first"))
+    }
+    ShareClicked -> (model, share(model.source))
+    Shared(label) -> labelled(Model(model | share_label: label, selected: ""))
+    LabelsReset ->
+      (
+        Model(model | format_label: "Format", share_label: "Copy link"),
+        effect.none(),
+      )
+  }
+}
+
+/// A new text: compile it once typing pauses.
+def edited(model: Model, text: String) -> (Model, Effect(Msg)) {
+  edits = model.edits + 1
+  model = Model(model | source: text, edits:, selected: "")
+  (model, after(90, CompileAfter(edits)))
+}
+
+/// Button labels like "Formatted" go back after a moment.
+def labelled(model: Model) -> (Model, Effect(Msg)) {
+  (model, after(1500, LabelsReset))
+}
+
+def after(ms: Int, msg: Msg) -> Effect(Msg) {
+  use dispatch <- effect.from
+  _ = global.set_timeout(ms, fn() { dispatch(msg) })
+  Nil
+}
+
+/// Replaces the editor's text, and with a selection, puts the cursor there
+/// and the focus in the editor (after Tab or Enter).
+def put(text: String, selection: Option((Int, Int))) -> Effect(Msg) {
+  use _ <- effect.from
+  Ok(input) = document.get_element_by_id("pg-input") else Nil
+  element.set_value(input, text)
+  case selection {
+    Some((start, end)) -> {
+      element.focus(input)
+      element.set_selection_range(input, start, end)
+    }
+    None -> Nil
+  }
+}
+
+/// The code goes in the link's hash, so it never reaches a server.
+def share(source: String) -> Effect(Msg) {
+  use dispatch <- effect.from
+  location = window.location(window.self())
+  url =
+    location.origin(location) <> location.pathname(
+      location,
+    ) <> "#code=" <> bit_array.base64_url_encode(<<source:utf8>>, False)
+  replace_url(url)
+  _ =
+    clipboard.write_text(url)
+    |> promise.map(fn(copied) {
+      case copied {
+        Ok(_) -> dispatch(Shared("Link copied"))
+        Error(_) -> dispatch(Shared("Link is in the address bar"))
+      }
+    })
+  Nil
+}
+
+def save_draft(source: String) -> Nil {
+  _ =
+    web_storage.local()
+    |> result.map(web_storage.set_item(_, draft_key, source))
+  Nil
+}

@@ -1,0 +1,309 @@
+//// The tour: its contents page and one page per lesson.
+
+import bea_site/code
+import bea_site/content
+import bea_site/highlight
+import bea_site/layout.{type Page, Page}
+import bea_site/lessons.{type Chapter, type Lesson, Exercism, Feature}
+import bea_site/links
+import lustre/attribute.{class, href}
+import lustre/element.{type Element}
+import lustre/element/html
+
+/// The lesson's code: Bea, the Gleam it becomes, more files, its output.
+pub def tabs(lesson: Lesson) -> List(code.Tab) {
+  case lesson.source {
+    Exercism(file) -> {
+      base = "examples/#{file}"
+      list.flatten([
+        [
+          code.tab("Bea", highlight.Bea, content.read(base <> ".bea")),
+          code.tab("Gleam", highlight.Gleam, content.read(base <> ".gleam")),
+        ],
+        output(base <> ".out"),
+      ])
+    }
+    Feature(module, more) ->
+      list.flatten([
+        [
+          code.tab(
+            "Bea",
+            highlight.Bea,
+            content.read("features/src/#{module}.bea"),
+          ),
+          code.tab(
+            "Gleam",
+            highlight.Gleam,
+            content.read("features/generated/#{module}.gleam"),
+          ),
+        ],
+        list.map(more, fn(f) {
+          code.tab(f.label, f.lang, content.read(f.path))
+        }),
+        output("features/generated/#{module}.out"),
+      ])
+  }
+}
+
+def output(path: String) -> List(code.Tab) {
+  if content.exists(path) {
+    [code.tab("Output", highlight.Output, content.read(path))]
+  } else {
+    []
+  }
+}
+
+/// The Bea source of a lesson, for the playground.
+pub def source(lesson: Lesson) -> String {
+  case lesson.source {
+    Exercism(file) -> content.read("examples/#{file}.bea")
+    Feature(module, _) -> content.read("features/src/#{module}.bea")
+  }
+}
+
+def source_note(lesson: Lesson) -> Element(msg) {
+  case lesson.source {
+    Exercism(file) ->
+      html.p([class("source-note")], [
+        html.text("An exercism exercise from the Gleam track, solved in Bea: "),
+        html.a(
+          [href("#{links.repo}/blob/main/beacode/src/#{file}.bea")],
+          [html.text("beacode/src/#{file}.bea")],
+        ),
+      ])
+    Feature(module, _) ->
+      html.p([class("source-note")], [
+        html.text(
+          "This lesson's code is a module of a small Bea project, compiled and run by ",
+        ),
+        html.code([], [html.text("bea")]),
+        html.text(" for this page: "),
+        html.a(
+          [
+            href(
+              "#{links.site_repo}/blob/main/content/features/src/#{module}.bea",
+            ),
+          ],
+          [html.text("content/features/src/#{module}.bea")],
+        ),
+      ])
+  }
+}
+
+// --- Lesson pages ---------------------------------------------------------------------
+
+pub def lesson_pages() -> List((String, Page(Nil))) {
+  all = lessons.in_order()
+  count = list.length(all)
+  all
+  |> list.index_map(fn(entry, i) {
+    (lesson, number, chapter) = entry
+    prev = list.drop(all, i - 1) |> list.first
+    next = list.drop(all, i + 1) |> list.first
+    prev = if i == 0 {
+      Error(Nil)
+    } else {
+      prev
+    }
+    next = if i + 1 >= count {
+      Error(Nil)
+    } else {
+      next
+    }
+    (lesson.slug, lesson_page(lesson, number, chapter, prev, next))
+  })
+}
+
+def lesson_page(
+  lesson: Lesson,
+  number: Int,
+  chapter: Chapter,
+  prev: Result((Lesson, Int, Chapter), Nil),
+  next: Result((Lesson, Int, Chapter), Nil),
+) -> Page(Nil) {
+  actions = [
+    html.a(
+      [class("open-pg"), href("../../playground/?example=#{lesson.slug}")],
+      [html.text("Open in playground")],
+    ),
+  ]
+  pager = html.nav(
+    [class("pager"), attribute.aria_label("Previous and next lesson")],
+    [
+      case prev {
+        Ok((p, _, _)) ->
+          pager_link("pager-prev", "../#{p.slug}/", "Previous", p.title)
+        Error(_) -> pager_link("pager-prev", "../", "Back to", "Tour contents")
+      },
+      case next {
+        Ok((n, _, _)) ->
+          pager_link("pager-next", "../#{n.slug}/", "Next", n.title)
+        Error(_) ->
+          pager_link(
+            "pager-next",
+            "../../playground/",
+            "Next",
+            "Try the playground",
+          )
+      },
+    ],
+  )
+  body = [
+    html.div([class("wrap tour-layout")], [
+      nav(lesson.slug),
+      html.article([class("lesson")], [
+        html.header([class("lesson-head")], [
+          html.p([class("lesson-chapter")], [
+            html.text("Chapter #{int.to_string(number)}: #{chapter.title}"),
+          ]),
+          html.h1([], [html.text(lesson.title)]),
+          html.ul(
+            [class("teaches"), attribute.aria_label("What this lesson shows")],
+            list.map(lesson.teaches, fn(t) { html.li([], [html.text(t)]) }),
+          ),
+        ]),
+        element.unsafe_raw_html(
+          "",
+          "div",
+          [class("prose lesson-notes")],
+          lesson.notes,
+        ),
+        code.tabs(
+          "lesson",
+          tabs(lesson),
+          caption: "#{lesson.title} in Bea",
+          actions:,
+          extra_class: "lesson-code",
+        ),
+        source_note(lesson),
+        pager,
+      ]),
+    ]),
+  ]
+  Page(
+    title: "#{lesson.title}: tour",
+    description: "#{lesson.title}, a lesson of the Bea tour. Shows #{string.join(lesson.teaches, ", ")}.",
+    root: "../../",
+    active: "tour",
+    body_class: "tour-page",
+    body:,
+    modules: [],
+  )
+}
+
+def pager_link(
+  class_name: String,
+  url: String,
+  label: String,
+  title: String,
+) -> Element(msg) {
+  html.a([class(class_name), href(url)], [
+    html.span([], [html.text(label)]),
+    html.text(title),
+  ])
+}
+
+/// Every lesson, by chapter, with the current one marked.
+def nav(current: String) -> Element(msg) {
+  html.nav(
+    [class("tour-nav"), attribute.aria_label("Tour lessons")],
+    [
+      html.details([class("tour-nav-details"), attribute.open(True)], [
+        html.summary([], [html.text("All lessons")]),
+        html.ol(
+          [class("chapters")],
+          list.map(lessons.chapters(), fn(chapter) {
+            html.li([], [
+              html.span([class("chapter-title")], [html.text(chapter.title)]),
+              html.ol(
+                [],
+                list.map(chapter.lessons, fn(l) {
+                  mark = if l.slug == current {
+                    [attribute.aria_current("page")]
+                  } else {
+                    []
+                  }
+                  html.li([], [
+                    html.a([href("../#{l.slug}/") | mark], [
+                      html.text(l.title),
+                    ]),
+                  ])
+                }),
+              ),
+            ])
+          }),
+        ),
+      ]),
+    ],
+  )
+}
+
+// --- Contents ---------------------------------------------------------------------------
+
+pub def index() -> Page(Nil) {
+  chapters = lessons.chapters()
+  Ok((first, _, _)) = list.first(lessons.in_order()) else panic
+  exercises =
+    chapters
+    |> list.flat_map(fn(c) { c.lessons })
+    |> list.count(fn(l) {
+      case l.source {
+        Exercism(_) -> True
+        Feature(| _) -> False
+      }
+    })
+  body = [
+    html.div([class("wrap tour-intro")], [
+      html.header([class("page-head")], [
+        html.h1([], [html.text("Language tour")]),
+        html.p([class("section-lede")], [
+          html.text(
+            "#{int.to_string(exercises)} exercises from the Gleam track on ",
+          ),
+          html.a([href(links.exercism)], [html.text("exercism")]),
+          html.text(
+            ", solved in Bea, then a chapter on records, else guards, deriving and testing. Each lesson shows the Bea code, the Gleam it compiles to, and what it prints. Start at the top if Bea is new to you; every lesson builds on the last.",
+          ),
+        ]),
+        html.p([], [
+          html.a([class("btn btn-primary"), href("#{first.slug}/")], [
+            html.text("Start with #{first.title}"),
+          ]),
+        ]),
+      ]),
+      html.ol(
+        [class("chapter-grid")],
+        list.index_map(chapters, fn(chapter, i) {
+          html.li([class("chapter-card")], [
+            html.h2([], [
+              html.span([class("chapter-num")], [
+                html.text(int.to_string(i + 1)),
+              ]),
+              html.text(chapter.title),
+            ]),
+            html.ol(
+              [],
+              list.map(chapter.lessons, fn(l) {
+                html.li([], [
+                  html.a([href("#{l.slug}/")], [html.text(l.title)]),
+                  html.span([class("chapter-teaches")], [
+                    html.text(string.join(l.teaches, ", ")),
+                  ]),
+                ])
+              }),
+            ),
+          ])
+        }),
+      ),
+    ]),
+  ]
+  Page(
+    title: "Language tour",
+    description: "Learn Bea through exercism exercises and lessons on its newer features: Bea code, the Gleam it compiles to, and its output.",
+    root: "../",
+    active: "tour",
+    body_class: "tour-index",
+    body:,
+    modules: [],
+  )
+}

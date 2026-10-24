@@ -1,0 +1,383 @@
+//// The Bea syntax tree.
+////
+//// Every node carries a `Span` (byte offsets into the source). Spans are what
+//// make precise error messages, source maps and the LSP possible.
+
+import bea/span.{type Span}
+import gleam/option.{type Option}
+
+pub type Module {
+  Module(items: List(Item), module_doc: List(String))
+}
+
+pub type Publicity {
+  Public
+  Private
+}
+
+/// `@name(arg, arg)` — passed through to Gleam untouched, e.g.
+/// `@external(erlang, "lists", "reverse")` or `@deprecated("use x")`.
+/// The exception is `@derive(...)` on a type, which `bea/deriving` expands.
+pub type Attribute {
+  Attribute(span: Span, name: String, args: List(AttributeArg))
+}
+
+pub type AttributeArg {
+  AttrName(name: String, span: Span)
+  AttrString(String)
+}
+
+pub type Item {
+  Import(
+    span: Span,
+    module: String,
+    module_span: Span,
+    alias: Option((String, Span)),
+    unqualified: List(Unqualified),
+  )
+  Function(span: Span, name: String, name_span: Span, clauses: List(Clause))
+  CustomType(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    opaque_: Bool,
+    name: String,
+    name_span: Span,
+    params: List(String),
+    variants: List(Variant),
+  )
+  /// `type Name(a) = Other(a)`
+  TypeAlias(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    params: List(String),
+    aliased: Type,
+  )
+  /// A type with no constructors: `pub type Usd` (phantom / external types).
+  ExternalType(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    params: List(String),
+  )
+  Const(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name: String,
+    name_span: Span,
+    annotation: Option(Type),
+    value: Expr,
+  )
+}
+
+pub type Unqualified {
+  Unqualified(span: Span, is_type: Bool, name: String, alias: Option(String))
+}
+
+pub type Variant {
+  Variant(span: Span, name: String, fields: List(Field), doc: List(String))
+}
+
+pub type Field {
+  Field(span: Span, label: Option(String), type_: Type)
+}
+
+/// One `def` line. Consecutive `def`s with the same name form one function.
+/// A clause without a body is either a signature ("function head") or, when
+/// it carries an `@external` attribute, an external function.
+pub type Clause {
+  Clause(
+    span: Span,
+    doc: List(String),
+    attributes: List(Attribute),
+    publicity: Publicity,
+    name_span: Span,
+    params: List(Param),
+    return_type: Option(Type),
+    guard: Option(Expr),
+    body: Option(List(Statement)),
+  )
+}
+
+pub type Param {
+  Param(
+    span: Span,
+    label: Option(String),
+    pattern: Pattern,
+    annotation: Option(Type),
+  )
+}
+
+pub type Type {
+  NamedType(span: Span, module: Option(String), name: String, args: List(Type))
+  VarType(span: Span, name: String)
+  TupleType(span: Span, elements: List(Type))
+  FnType(span: Span, params: List(Type), return: Type)
+  HoleType(span: Span, name: String)
+}
+
+pub type Statement {
+  /// `pattern = value`. Becomes `let` or `let assert` depending on whether
+  /// the pattern can fail.
+  Assign(span: Span, pattern: Pattern, annotation: Option(Type), value: Expr)
+  Expression(expr: Expr)
+  Return(span: Span, value: Expr)
+  /// `use a, b <- f(x)`
+  Use(span: Span, patterns: List(UsePattern), call: Expr)
+  /// `assert x == y` / `assert x as "message"`
+  Assert(span: Span, value: Expr, message: Option(Expr))
+  /// A guard: `pattern = value else fallback`. When `value` doesn't match
+  /// `pattern`, the enclosing function returns `fallback` and the rest of
+  /// the block never runs — `?` for any pattern, with any exit value.
+  ///
+  /// - `pattern` is None for a boolean guard: `allowed(ip) else deny()`.
+  /// - With `value?` the pattern matches the `Ok` payload, and the `else`
+  ///   can bind the error: `user = auth(req)? else e -> deny(e)`.
+  Guard(
+    span: Span,
+    pattern: Option(Pattern),
+    annotation: Option(Type),
+    value: Expr,
+    otherwise: Otherwise,
+  )
+}
+
+/// The `else` of a guard: `else fallback`, `else { ... }`, or
+/// `else pattern -> fallback` where `pattern` binds what didn't match (the
+/// error, for `value?`).
+pub type Otherwise {
+  Otherwise(span: Span, binding: Option(Pattern), body: List(Statement))
+}
+
+pub type UsePattern {
+  UsePattern(span: Span, pattern: Pattern, annotation: Option(Type))
+}
+
+pub type StringPart {
+  Text(raw: String, span: Span)
+  Interpolation(expr: Expr, span: Span)
+}
+
+pub type BinOp {
+  Add
+  Sub
+  Mul
+  Div
+  Rem
+  AddFloat
+  SubFloat
+  MulFloat
+  DivFloat
+  Eq
+  NotEq
+  Lt
+  LtEq
+  Gt
+  GtEq
+  LtFloat
+  LtEqFloat
+  GtFloat
+  GtEqFloat
+  Concatenate
+  And
+  Or
+  Pipe
+}
+
+pub type Arg {
+  /// `value: None` is the shorthand `label:` form.
+  Arg(span: Span, label: Option(String), value: Option(Expr))
+}
+
+pub type FnParam {
+  FnParam(span: Span, pattern: Pattern, annotation: Option(Type))
+}
+
+pub type CondClause {
+  CondClause(span: Span, condition: Expr, body: Expr)
+}
+
+pub type CaseClause {
+  /// `alternatives` is a list of `|`-separated alternatives, each holding one
+  /// pattern per case subject.
+  CaseClause(
+    span: Span,
+    alternatives: List(List(Pattern)),
+    guard: Option(Expr),
+    body: Expr,
+  )
+}
+
+pub type Segment(value) {
+  Segment(span: Span, value: value, options: List(SegmentOption(value)))
+}
+
+pub type SegmentOption(value) {
+  SegmentOption(span: Span, name: String, arg: Option(value))
+}
+
+pub type Expr {
+  Int(span: Span, text: String)
+  Float(span: Span, text: String)
+  String(span: Span, parts: List(StringPart))
+  RawString(span: Span, value: String)
+  Var(span: Span, name: String)
+  /// `Ok`, `True`, `option.Some`, `html.Text`...
+  Constructor(span: Span, module: Option(String), name: String)
+  /// `_` used as a function capture hole: `list.map(xs, f(_, 1))`
+  Hole(span: Span)
+  /// `a.b`. When `a` is an (unshadowed) imported module this is a module
+  /// access; otherwise it is record field access.
+  FieldAccess(span: Span, base: Expr, field: String, field_span: Span)
+  TupleIndex(span: Span, base: Expr, index: Int)
+  Call(span: Span, fun: Expr, args: List(Arg))
+  /// `Ctor(base | field: value)`
+  RecordUpdate(span: Span, constructor: Expr, base: Expr, updates: List(Arg))
+  Tuple(span: Span, elements: List(Expr))
+  List(span: Span, elements: List(Expr), tail: Option(Expr))
+  /// `%{k: v}` or `%{base | k: v}`
+  Map(span: Span, base: Option(Expr), pairs: List((Expr, Expr)))
+  Fn(
+    span: Span,
+    params: List(FnParam),
+    return_type: Option(Type),
+    body: List(Statement),
+  )
+  FnClauses(span: Span, clauses: List(CaseClause))
+  Block(span: Span, statements: List(Statement))
+  If(
+    span: Span,
+    condition: Expr,
+    then: List(Statement),
+    else_: Option(List(Statement)),
+  )
+  Cond(span: Span, clauses: List(CondClause))
+  Case(span: Span, subjects: List(Expr), clauses: List(CaseClause))
+  BinaryOp(span: Span, op: BinOp, left: Expr, right: Expr)
+  Negate(span: Span, value: Expr)
+  /// `-.x`, compiled to `float.negate(x)`
+  NegateFloat(span: Span, value: Expr)
+  Not(span: Span, value: Expr)
+  /// `echo x`, `echo x as "msg"`, or the pipe form `x |> echo` (value None)
+  Echo(span: Span, value: Option(Expr), message: Option(Expr))
+  /// The `?` operator
+  Try(span: Span, value: Expr)
+  Panic(span: Span, message: Option(Expr))
+  Todo(span: Span, message: Option(Expr))
+  BitArray(span: Span, segments: List(Segment(Expr)))
+}
+
+pub type PatternArg {
+  /// `value: None` is the shorthand `label:` form, which binds `label`.
+  PatternArg(span: Span, label: Option(String), value: Option(Pattern))
+}
+
+pub type Pattern {
+  PInt(span: Span, text: String)
+  PFloat(span: Span, text: String)
+  PString(span: Span, raw: String)
+  PVar(span: Span, name: String)
+  PDiscard(span: Span, name: String)
+  PTuple(span: Span, elements: List(Pattern))
+  /// `[a, b | rest]`; `tail` is `Some(PDiscard)` for `[a | _]`.
+  PList(span: Span, elements: List(Pattern), tail: Option(Pattern))
+  /// `Ctor(a, label: b | _)` — `spread` is the trailing `| _` (Gleam's `..`).
+  PConstructor(
+    span: Span,
+    module: Option(String),
+    name: String,
+    args: List(PatternArg),
+    spread: Bool,
+  )
+  /// `pattern as name`
+  PAssign(span: Span, pattern: Pattern, name: String)
+  /// `"prefix" <> rest` or `"prefix" as p <> rest`
+  PConcat(
+    span: Span,
+    prefix: String,
+    prefix_name: Option(String),
+    rest: Pattern,
+  )
+  PBitArray(span: Span, segments: List(Segment(Pattern)))
+}
+
+// --- Span accessors ---------------------------------------------------------
+
+pub def expr_span(expr: Expr) -> Span {
+  expr.span
+}
+
+pub def pattern_span(pattern: Pattern) -> Span {
+  pattern.span
+}
+
+pub def type_span(t: Type) -> Span {
+  t.span
+}
+
+pub def statement_span(statement: Statement) -> Span {
+  case statement {
+    Expression(e) -> e.span
+    Assign(span: | _) -> span
+    Return(span: | _) -> span
+    Use(span: | _) -> span
+    Assert(span: | _) -> span
+    Guard(span: | _) -> span
+  }
+}
+
+pub def item_span(item: Item) -> Span {
+  item.span
+}
+
+pub def binop_to_string(op: BinOp) -> String {
+  case op {
+    Add -> "+"
+    Sub -> "-"
+    Mul -> "*"
+    Div -> "/"
+    Rem -> "%"
+    AddFloat -> "+."
+    SubFloat -> "-."
+    MulFloat -> "*."
+    DivFloat -> "/."
+    Eq -> "=="
+    NotEq -> "!="
+    Lt -> "<"
+    LtEq -> "<="
+    Gt -> ">"
+    GtEq -> ">="
+    LtFloat -> "<."
+    LtEqFloat -> "<=."
+    GtFloat -> ">."
+    GtEqFloat -> ">=."
+    Concatenate -> "<>"
+    And -> "&&"
+    Or -> "||"
+    Pipe -> "|>"
+  }
+}
+
+/// Gleam operator precedence (higher binds tighter).
+pub def precedence(op: BinOp) -> Int {
+  case op {
+    Or -> 1
+    And -> 2
+    Eq | NotEq -> 3
+    Lt | LtEq | Gt | GtEq | LtFloat | LtEqFloat | GtFloat | GtEqFloat -> 4
+    Concatenate -> 5
+    Pipe -> 6
+    Add | Sub | AddFloat | SubFloat -> 7
+    Mul | Div | Rem | MulFloat | DivFloat -> 8
+  }
+}

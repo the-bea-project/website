@@ -1,0 +1,24 @@
+//// A module of the project and its tests: `bea test` runs
+//// test/features_test.gleam, which tests Bea code from Gleam.
+
+pub def slug(title: String) -> String {
+  title
+  |> string.lowercase
+  |> string.split(" ")
+  |> list.filter(fn(word) { word != "" })
+  |> string.join("-")
+}
+
+/// The reading time of a text, in whole minutes, at least one.
+pub def minutes(text: String, words_per_minute: Int) -> Result(Int, String) {
+  words_per_minute > 0 else Error("words per minute must be positive")
+  words = text |> string.split(" ") |> list.count(fn(w) { w != "" })
+  Ok(
+    int.max(
+      1,
+      {
+        words + words_per_minute - 1
+      } / words_per_minute,
+    ),
+  )
+}

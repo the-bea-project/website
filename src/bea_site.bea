@@ -1,0 +1,231 @@
+//// Builds the site into dist/: `bea run`.
+////
+//// Every page is a Lustre view rendered to HTML here, on Node. The browser
+//// modules the pages load (bea_site/browser/*) are compiled by the same
+//// build; this copies them, and the modules they import, next to the pages.
+////
+//// Reads content/ and assets/. OUT_DIR changes where the site goes
+//// (default dist), SITE_BASE is its absolute base path (default /), which
+//// only 404.html needs: GitHub Pages serves it at any depth.
+
+import bea_site/community
+import bea_site/content
+import bea_site/examples.{type Example, Example}
+import bea_site/home
+import bea_site/layout.{type Page, Page}
+import bea_site/lessons
+import bea_site/markup
+import bea_site/playground
+import bea_site/toolchain
+import bea_site/tour
+import envoy
+import gleam/regexp
+import lustre/attribute.{class, href}
+import lustre/element/html
+import simplifile
+
+/// Where `bea build` puts the compiled JavaScript.
+const javascript = ".beabuild/build/dev/javascript"
+
+/// The browser modules, as the pages start them.
+const browser_modules = ["enhance", "playground"]
+
+pub def main() -> Nil {
+  out = envoy.get("OUT_DIR") |> result.unwrap("dist")
+  base = envoy.get("SITE_BASE") |> result.unwrap("/") |> with_slash
+
+  _ = simplifile.delete(out)
+  Ok(_) = simplifile.create_directory_all(out)
+    else panic as "can't create the output directory"
+  Ok(_) = simplifile.copy_directory("assets", out <> "/assets")
+    else panic as "can't copy assets/"
+
+  pages = list.flatten([
+    [("index.html", layout.render(home.page()))],
+    [("tour/index.html", layout.render(tour.index()))],
+    tour.lesson_pages()
+    |> list.map(fn(entry) {
+      (slug, page) = entry
+      ("tour/#{slug}/index.html", layout.render(page))
+    }),
+    [
+      ("toolchain/index.html", layout.render(toolchain.page())),
+      (
+        "playground/index.html",
+        layout.render(playground.page(playground_examples())),
+      ),
+      ("community/index.html", layout.render(community.page())),
+      ("404.html", layout.render(not_found(base))),
+      (".nojekyll", ""),
+    ],
+  ])
+  list.each(pages, fn(page) {
+    (path, html) = page
+    write(out <> "/" <> path, html)
+  })
+
+  modules = browser_javascript()
+  list.each(modules, fn(module) {
+    Ok(_) = simplifile.create_directory_all(
+      parent(out <> "/assets/js/" <> module),
+    ) else panic
+    Ok(_) = simplifile.copy_file(
+      javascript <> "/" <> module,
+      out <> "/assets/js/" <> module,
+    ) else panic
+  })
+
+  html_pages = list.count(pages, fn(page) { string.ends_with(page.0, ".html") })
+  io.println(
+    "Built #{int.to_string(html_pages)} pages and #{int.to_string(list.length(modules))} JavaScript modules into #{out}/",
+  )
+}
+
+def write(path: String, text: String) -> Nil {
+  Ok(_) = simplifile.create_directory_all(parent(path)) else panic
+  Ok(_) = simplifile.write(path, text) else panic
+  Nil
+}
+
+def with_slash(path: String) -> String {
+  if string.ends_with(path, "/") {
+    path
+  } else {
+    path <> "/"
+  }
+}
+
+// --- Playground examples ----------------------------------------------------------------------
+
+def playground_examples() -> List(Example) {
+  highlights =
+    [
+      ("hero", "shapes", "Shapes (home page)"),
+      ("clauses", "clauses", "FizzBuzz with clauses"),
+      ("returns", "returns", "Early return"),
+      ("question", "question", "The ? operator"),
+      ("guards", "guards", "Else guards"),
+      ("anon", "anon", "Anonymous clauses"),
+      ("records", "records-shorthand", "Records and record patterns"),
+    ]
+    |> list.map(fn(snippet) {
+      (file, slug, title) = snippet
+      Example(
+        slug:,
+        title:,
+        group: "Highlights",
+        code: content.read("snippets/#{file}.bea"),
+      )
+    })
+  tour =
+    lessons.in_order()
+    |> list.map(fn(entry) {
+      (lesson, _, _) = entry
+      Example(
+        slug: lesson.slug,
+        title: lesson.title,
+        group: "Tour",
+        code: tour.source(lesson),
+      )
+    })
+  list.append(highlights, tour)
+}
+
+// --- 404 ---------------------------------------------------------------------------------------
+
+def not_found(base: String) -> Page(Nil) {
+  Page(
+    title: "Page not found",
+    description: "Page not found.",
+    root: base,
+    active: "",
+    body_class: "lost-page",
+    body: [
+      html.div([class("wrap lost")], [
+        html.img([
+          attribute.src(base <> "assets/beatrix.svg"),
+          attribute.alt(""),
+          attribute.width(180),
+          attribute.height(180),
+        ]),
+        html.h1([], [html.text("This page fell past the event horizon")]),
+        markup.p(
+          "There is nothing at this address. Beatrix swears she didn't eat it.",
+        ),
+        html.p([], [
+          html.a([class("btn btn-primary"), href(base)], [
+            html.text("Go to the home page"),
+          ]),
+          html.text(" "),
+          html.a([class("btn"), href(base <> "tour/")], [
+            html.text("Open the tour"),
+          ]),
+        ]),
+      ]),
+    ],
+    modules: [],
+  )
+}
+
+// --- The browser's JavaScript --------------------------------------------------------------------
+
+/// The compiled modules the browser loads: the entry points and everything
+/// they import, as paths under `javascript`.
+def browser_javascript() -> List(String) {
+  entries = list.map(browser_modules, fn(m) {
+    "bea_site/bea_site/browser/#{m}.mjs"
+  })
+  reachable(entries, set.new()) |> set.to_list |> list.sort(string.compare)
+}
+
+def reachable(queue: List(String), seen: Set(String)) -> Set(String) {
+  case queue {
+    [] -> seen
+    [module | rest] -> {
+      if set.contains(seen, module) {
+        return reachable(rest, seen)
+      }
+      message = "can't read #{javascript}/#{module} (was the site built with `bea build`?)"
+      Ok(source) = simplifile.read(javascript <> "/" <> module)
+        else panic as message
+      imported = imports(source) |> list.map(resolve(parent(module), _))
+      reachable(list.append(imported, rest), set.insert(seen, module))
+    }
+  }
+}
+
+/// The relative imports of a compiled module: `import … from "./x.mjs"`,
+/// `export … from "../y.mjs"`, `import "./z.mjs"`.
+def imports(source: String) -> List(String) {
+  Ok(pattern) = regexp.from_string(
+    "(?:^|\\n)\\s*(?:import|export)\\s*(?:[^\"';]*?\\sfrom\\s*)?[\"'](\\.{1,2}/[^\"']+)[\"']",
+  ) else panic
+  regexp.scan(pattern, source)
+  |> list.filter_map(fn(m) {
+    case m.submatches {
+      [Some(path)] -> Ok(path)
+      _ -> Error(Nil)
+    }
+  })
+}
+
+def parent(path: String) -> String {
+  case string.split(path, "/") |> list.reverse {
+    [_ | rest] -> rest |> list.reverse |> string.join("/")
+    [] -> ""
+  }
+}
+
+/// `dir` joined with a relative `path`, with `.` and `..` resolved.
+def resolve(dir: String, path: String) -> String {
+  string.split(dir <> "/" <> path, "/")
+  |> list.fold([], fn(parts, part) {
+    case part, parts {
+      "", _ | ".", _ -> parts
+      "..", [_ | up] -> up
+      _, _ -> [part | parts]
+    }
+  })
+  |> list.reverse
+  |> string.join("/")
+}

@@ -1,9 +1,10 @@
 name: Deploy to GitHub Pages
 
-# Builds the site with plain Node (no Gleam or Erlang needed: the generated
-# Gleam, example output and the playground bundle are committed) and publishes
-# dist/ to GitHub Pages. In the repository settings, set Pages -> Source to
-# "GitHub Actions".
+# The site is a Bea project. This installs the latest bea release (a
+# standalone Linux binary) and Gleam, renders every page with `bea run` on
+# Node, and publishes dist/. The examples' generated Gleam and output are
+# committed (scripts/sync-examples.sh), so the build needs nothing else.
+# In the repository settings, set Pages -> Source to "GitHub Actions".
 
 on:
   push:
@@ -24,19 +25,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.18.1"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          
+
+      - name: Install the latest released bea
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/bea" \
+            https://github.com/the-bea-project/bea/releases/latest/download/bea-linux-amd64
+          chmod +x "$HOME/.local/bin/bea"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - id: pages
         uses: actions/configure-pages@v5
-        
-      # The base path (e.g. /website) is only needed by 404.html.
-      - run: node build.mjs
+
+      # Builds the site (and its browser modules) for JavaScript, then runs
+      # it: every page is rendered into dist/. The base path (e.g. /website)
+      # is only needed by 404.html.
+      - name: Build the site
+        run: bea run
         env:
           SITE_BASE: ${{ steps.pages.outputs.base_path }}/
-          
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

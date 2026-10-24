@@ -1,0 +1,6 @@
+src/records.bea:34
+"Ada, level 3"
+src/records.bea:35
+Point(2.5, 0.0)
+src/records.bea:36
+Page([UserId(1), UserId(2)], 1, 2)

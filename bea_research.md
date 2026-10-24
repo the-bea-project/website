@@ -1,11 +1,25 @@
 # Bea: suggestions for the transpiler
 
-Notes from building the website against `the-bea-project/bea` at commit
-`b21332a` (CLI reports `bea 0.2.0`), with Gleam 1.18.1 and Erlang/OTP 28.5.
-Everything below was reproduced, not guessed. It is ordered by how much I
-think it matters.
+Notes from building the website against `the-bea-project/bea`: first at
+commit `b21332a` (`bea 0.2.0`), then, rewriting the site in Bea, at 0.3.0
+(`91f5e86`), with Gleam 1.18.1 and Erlang/OTP 28. Everything below was
+reproduced, not guessed. It is ordered by how much I think it matters.
 
 ## Bugs
+
+### 0. `panic as` with an interpolated message (0.3.0)
+
+`panic as "can't read #{path}"` generates `panic as "can't read " <> path`,
+which Gleam parses as `(panic as "can't read ") <> path`: a warning
+("Unreachable code") and the message loses its end. The same goes for `todo
+as` and `assert … as`. Codegen should wrap a message that isn't a single
+string literal in braces: `panic as { "can't read " <> path }`. The site binds
+the message to a variable first (`src/bea_site/content.bea`).
+
+A smaller one: a type mismatch between `cond` clauses is reported on the
+clause *before* the one with the wrong type
+(`src/bea_site/playground.bea`, the `decode.failure` clause of `on_key`,
+while it was being written).
 
 ### 1. The end-to-end script never runs the exercism examples
 
@@ -55,7 +69,10 @@ differ, and every file fails with "Formatter bug". There is a second trap: JS
 `inspect` reads class names, so a minified bundle (no `--keep-names`) breaks it
 again.
 
-The website works around both (patched regex, `--keep-names`). A sturdier fix
+Still true in 0.3.0. The website works around it: `scripts/sync-compiler.sh`
+patches the regex in its copy of `formatter.bea` (and fails loudly once the
+line changes upstream). The site doesn't minify, so class names survive. A
+sturdier fix
 upstream is to stop comparing printed text: write an `erase_spans(module)`
 that rebuilds the AST with `Span(0, 0)` everywhere and compare with `==`, or at
 least accept both spellings:
@@ -182,19 +199,21 @@ would read better to push the rest of the function into the non-returning arms
 
 ## Make the compiler core a supported JS target
 
-The lexer, parser, lowering, codegen, formatter, diagnostics and source map are
-pure Gleam with no Erlang FFI. The website's playground compiles them to
-JavaScript unchanged (53 KB gzipped) and its output is byte-identical to the CLI
-for all 24 examples, both for transpiling and formatting.
+The lexer, parser, deriving, lowering, codegen, formatter, diagnostics and
+source map are Bea modules with no FFI. The website copies their source
+(`scripts/sync-compiler.sh`) and compiles it with the rest of the site for the
+JavaScript target, so the playground runs the compiler built from its Bea
+source. Its output is byte-identical to the CLI for every example on the
+site, both for transpiling and formatting.
 
 Worth doing upstream:
 
-- Add the entry module (`website/playground-engine/src/bea_web.gleam`, 25
-  lines) to the repo, and a CI step that builds it with
-  `--target javascript`, so the core stays pure and the playground can't
-  silently break.
-- Publish it to npm as `@bea-lang/compiler` for editor plugins, docs tooling
-  and anyone who wants Bea in a browser.
+- A CI step that builds those modules with `--target javascript`, so the
+  core stays pure and the playground can't silently break (the site's sync
+  script fails when the core imports a module it doesn't copy, but only when
+  someone runs it).
+- Publish the core as a package (Hex for Gleam and Bea projects, npm for
+  editor plugins and docs tooling), which would also replace the site's copy.
 - Next step for the playground: Gleam's own tour runs the Gleam compiler as
   WebAssembly. Feeding the generated Gleam into that would give type checking
   and running in the browser, with no server.
@@ -203,12 +222,11 @@ Worth doing upstream:
 
 - **Licence.** The repo has no `LICENCE` file. Add one before people depend on
   it; `bea publish` and Hex will want it too.
-- **Versions.** `gleam.toml` says `version = "1.0.0"`; the CLI and VS Code
-  extension say `0.2.0`. Pick one; the site calls it a beta.
-- **Releases.** There's no prebuilt `bea` binary yet, which is why the site has
-  no install page. A GitHub release with an escript or gleepack binary per
-  platform, plus a one-line install script, would let the site add a "Get
-  started" page.
+- **Releases.** 0.3.0 ships a standalone Linux binary, which the site's
+  toolchain page installs from `releases/latest/download/bea-linux-amd64` (the
+  name the compiler's CI uses; keep the asset name stable). `bea pack -t` can
+  cross-build, so macOS binaries would be a small step, and a one-line install
+  script would shorten the page.
 - **beacode's stdlib bound.** `beacode/bea.toml` allows
   `gleam_stdlib >= 0.44.0`, but the code relies on 1.x behaviour (for example,
   `list.range` is gone in 1.0 and `int.range` takes a reducer). `>= 1.0.0` would

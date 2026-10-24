@@ -1,0 +1,480 @@
+//// The language tour. Six chapters of exercism exercises from the Gleam
+//// track, solved in Bea (bea/beacode, synced into content/examples), then a
+//// chapter on Bea's newer features (content/features, a project of its
+//// own). The notes are HTML, written for someone meeting Bea for the first
+//// time.
+
+import bea_site/highlight.{type Lang}
+
+pub type Chapter { title: String, lessons: List(Lesson) }
+
+pub type Lesson {
+  slug: String,
+  title: String,
+  /// The short list under the title.
+  teaches: List(String),
+  source: Source,
+  notes: String,
+}
+
+/// Where a lesson's code comes from.
+pub type Source {
+  /// An exercism exercise: content/examples/<file>.bea, .gleam and .out.
+  Exercism(file: String)
+  /// A module of content/features (generated Gleam and output in
+  /// content/features/generated/), with other files shown as more tabs.
+  Feature(module: String, more: List(File))
+}
+
+/// A file shown next to a lesson's code: its tab label, its path under
+/// content/, and its language.
+pub type File { label: String, path: String, lang: Lang }
+
+pub def chapters() -> List(Chapter) {
+  [
+    Chapter("First steps", [
+      Lesson(
+        slug: "hello-world",
+        title: "Hello, World!",
+        teaches: ["def", "echo"],
+        source: Exercism("e1_hello_world"),
+        notes: `<p>Every Bea program starts at a public function called <code>main</code>.
+Functions are declared with <code>def</code>, and <code>pub</code> makes one
+visible outside its module.</p>
+<p><code>echo</code> prints any value along with the file and line it came
+from, which makes it the quickest way to look inside a program. It is
+Gleam's <code>echo</code>, unchanged.</p>
+<p>Switch to the <strong>Gleam</strong> tab: the only difference is
+<code>def</code> becoming <code>fn</code>. Bea is Gleam with a different
+surface, so that is what most of this tour will keep showing you.</p>`,
+      ),
+      Lesson(
+        slug: "lasagna",
+        title: "Lasagna",
+        teaches: ["functions", "Int", "type annotations"],
+        source: Exercism("e2_lasagna"),
+        notes: `<p>A function's last expression is its result; there is no
+<code>return</code> needed for the normal case. Parameters can carry type
+annotations like <code>layers: Int</code>, and Gleam's type checker infers
+the rest.</p>
+<p>Functions without <code>pub</code> are private to the module. Calling one
+looks like you would expect: <code>preparation_time_in_minutes(2)</code>.</p>`,
+      ),
+      Lesson(
+        slug: "pacman-rules",
+        title: "Pac-Man rules",
+        teaches: ["Bool", "and / or / not", "imports"],
+        source: Exercism("e3_pacman_rules"),
+        notes: `<p>Bea spells boolean logic as words: <code>and</code>, <code>or</code> and
+<code>not</code>. They become Gleam's <code>&amp;&amp;</code>,
+<code>||</code> and <code>!</code>, and they short-circuit the same way.</p>
+<p><code>import gleam/io</code> brings in the standard library's IO module.
+You can skip imports for the standard library entirely: Bea adds
+<code>list</code>, <code>string</code>, <code>int</code> and friends
+automatically when you use them.</p>`,
+      ),
+      Lesson(
+        slug: "bettys-bike-shop",
+        title: "Betty's bike shop",
+        teaches: ["Float", "pipes", "interpolation"],
+        source: Exercism("e4_bettys_bikeshop"),
+        notes: `<p>Floats have their own operators, like <code>*.</code> and
+<code>+.</code>, so an <code>Int</code> never turns into a
+<code>Float</code> by accident.</p>
+<p>The pipe <code>|&gt;</code> passes the value on its left as the first
+argument of the call on its right. Read it top to bottom: take
+<code>21</code>, convert it to pounds, turn that into a string, print it.</p>
+<p><code>"£#{float.to_string(pounds)}"</code> is string interpolation: any
+<code>String</code> expression can go inside <code>#{…}</code>. Gleam has no
+interpolation, so it becomes <code>"£" &lt;&gt; …</code>.</p>`,
+      ),
+    ]),
+    Chapter("Making decisions", [
+      Lesson(
+        slug: "guessing-game",
+        title: "Guessing game",
+        teaches: ["return", "cond", "case", "guards"],
+        source: Exercism("e5_guessing_game"),
+        notes: `<p>The same function written three ways. Each is a good fit somewhere.</p>
+<p><strong>Early return.</strong> <code>reply_if</code> checks a condition
+and leaves straight away. In Gleam this needs
+<code>use &lt;- bool.guard(…)</code>; in Bea it is just
+<code>return</code>. The returned value is only computed when the branch is
+taken.</p>
+<p><strong>cond.</strong> A list of conditions, and the first true one wins.
+<code>_</code> or <code>True</code> is the fallback.</p>
+<p><strong>case.</strong> Pattern matching on the value itself:
+<code>41 | 43</code> matches either number and
+<code>g if g &gt; 42</code> adds a guard.</p>`,
+      ),
+      Lesson(
+        slug: "tisbury-treasure",
+        title: "Tisbury treasure hunt",
+        teaches: ["tuples", "anonymous functions"],
+        source: Exercism("e6_tisbury_treasure"),
+        notes: `<p>Tuples are written with plain parentheses: <code>("B", 4)</code>. Read a
+field by position with <code>.0</code>, <code>.1</code> and so on. They
+compile to Gleam's <code>#(…)</code>.</p>
+<p><code>fn(x) { x.1 == treasure_location }</code> is an anonymous function,
+handed to <code>list.count</code> to decide which treasures match.</p>`,
+      ),
+      Lesson(
+        slug: "tracks-on-tracks",
+        title: "Tracks on tracks on tracks",
+        teaches: ["lists", "multi-clause functions"],
+        source: Exercism("e7_tracks_on_tracks"),
+        notes: `<p><code>[language | languages]</code> builds a new list with one more item
+at the front. The same shape works as a pattern, which is how
+<code>count_languages</code> walks a list.</p>
+<p>This is the first <strong>multi-clause function</strong>. The body-less
+line declares the types once. Then each <code>def</code> handles one shape
+of input: the empty list, or a list with a head and a tail. Bea joins the
+clauses into a single Gleam function with a <code>case</code>, so the
+recursion stays tail-call optimised.</p>`,
+      ),
+      Lesson(
+        slug: "log-levels",
+        title: "Log levels",
+        teaches: ["strings", "destructuring"],
+        source: Exercism("e8_log_levels"),
+        notes: `<p>There is no <code>let</code> in Bea. <code>m = message(log_line)</code>
+binds a name, and a pattern on the left destructures:
+<code>[_, message] = string.split(log_line, ": ")</code>.</p>
+<p>That pattern could fail if the line has no <code>": "</code>, so Bea
+emits <code>let assert</code> for it. When a pattern can't fail, you get a
+plain <code>let</code>. You never have to choose.</p>`,
+      ),
+    ]),
+    Chapter("Your own types", [
+      Lesson(
+        slug: "valentines-day",
+        title: "Valentine's day",
+        teaches: ["custom types", "case", "guards"],
+        source: Exercism("e9_valentines_day"),
+        notes: `<p><code>pub type Activity { … }</code> defines a custom type: a value is
+exactly one of its variants, and some variants carry data, like
+<code>Movie(Genre)</code> or <code>Walk(Int)</code>.</p>
+<p><code>case</code> takes them apart. Patterns nest
+(<code>Movie(Romance)</code>), guards refine them
+(<code>Walk(k) if k &gt; 11</code>), and the compiler checks that every
+possibility is handled.</p>`,
+      ),
+      Lesson(
+        slug: "bandwagoner",
+        title: "Bandwagoner",
+        teaches: ["records", "record update", "label shorthand"],
+        source: Exercism("e10_bandwagoner"),
+        notes: `<p>A variant with named fields is a record. <code>Coach(name:,
+former_player:)</code> uses the label shorthand: when a variable has the
+same name as the field, you write the label once.</p>
+<p><code>Team(team | coach:)</code> copies <code>team</code> with a new
+coach. It reads like Elixir's map update and compiles to Gleam's
+<code>Team(..team, coach: coach)</code>.</p>
+<p>Fields chain with dots: <code>team.coach.name</code>.</p>`,
+      ),
+      Lesson(
+        slug: "bird-count",
+        title: "Bird count",
+        teaches: ["recursion", "clause guards"],
+        source: Exercism("e11_bird_count"),
+        notes: `<p>Multi-clause functions can have guards. In
+<code>has_day_without_birds</code>, the second clause only applies
+<code>if head == 0</code>; otherwise matching falls through to the next
+clause.</p>
+<p>Notice that <code>today</code> and <code>increment_day_count</code> need
+no type annotations at all. Gleam infers them from the patterns.</p>`,
+      ),
+      Lesson(
+        slug: "pizza-pricing",
+        title: "Pizza pricing",
+        teaches: ["recursive types", "maps", "?"],
+        source: Exercism("e12_pizza_pricing"),
+        notes: `<p><code>ExtraSauce(Pizza)</code> holds another pizza, so a pizza can be
+wrapped any number of times. The price function peels one layer per call.</p>
+<p><code>%{Margherita: 7, …}</code> is a map literal, compiled to
+<code>dict.from_list</code>.</p>
+<p><code>dict.get(price_map, p)?</code> uses the <code>?</code> operator: if
+the lookup is <code>Ok</code>, you get the value; if it is
+<code>Error</code>, the whole function returns that error immediately.
+It works in the middle of an expression, here even inside a
+<code>case</code> branch.</p>`,
+      ),
+    ]),
+    Chapter("Functions as values", [
+      Lesson(
+        slug: "secrets",
+        title: "Secrets",
+        teaches: ["closures", "function types"],
+        source: Exercism("e13_secrets"),
+        notes: `<p>Functions are values. <code>secret_add(2)</code> returns a new function
+that remembers <code>n</code>; that is a closure.</p>
+<p>The return type <code>fn (x: Int) -&gt; Int</code> spells out "a function
+from Int to Int". <code>secret_combine</code> takes two of them and pipes
+a value through both.</p>`,
+      ),
+      Lesson(
+        slug: "high-school-sweetheart",
+        title: "High school sweetheart",
+        teaches: ["string functions", "multi-line strings"],
+        source: Exercism("e14_highschool_sweetheart"),
+        notes: `<p>Pipelines can span several lines; a line that starts with
+<code>|&gt;</code> continues the expression above it.</p>
+<p><code>Ok(first) = … |&gt; string.first()</code> asserts that the name
+isn't empty. Strings can span lines, and interpolation works inside them,
+which is how the initials land in the middle of the heart.</p>`,
+      ),
+      Lesson(
+        slug: "treasure-chest",
+        title: "Treasure chest",
+        teaches: ["generics", "cond"],
+        source: Exercism("e15_treasure_chest"),
+        notes: `<p><code>TreasureChest(t)</code> is generic: <code>t</code> stands for any
+type, chosen by whoever builds the chest. Here it holds a tuple, but it
+could hold anything.</p>
+<p><code>cond</code> compiles to nested <code>case</code> expressions on
+<code>True</code>/<code>False</code>; you write the flat version.</p>`,
+      ),
+      Lesson(
+        slug: "go",
+        title: "Go",
+        teaches: ["Result", "result.try", "record update"],
+        source: Exercism("e16_go"),
+        notes: `<p>Rules return <code>Result(Game, String)</code>: either an updated game
+or a reason the move is illegal. <code>result.map</code> and
+<code>result.try</code> chain them so the first error stops the rest.</p>
+<p>Anonymous functions can annotate their parameters too:
+<code>fn(g: Game) { … }</code>.</p>`,
+      ),
+    ]),
+    Chapter("Collections", [
+      Lesson(
+        slug: "high-score-board",
+        title: "High score board",
+        teaches: ["dicts", "type aliases", "Option"],
+        source: Exercism("e17_high_score_board"),
+        notes: `<p><code>pub type Scores = Dict(String, Int)</code> gives a long type a
+short name.</p>
+<p><code>Some</code>, <code>None</code> and <code>Dict</code> appear without
+any import: Bea adds the right imports for standard library names when you
+use them, and it is scope aware, so a variable called <code>list</code> is
+never mistaken for the module.</p>`,
+      ),
+      Lesson(
+        slug: "weather-ranking",
+        title: "Weather ranking",
+        teaches: ["multi-clause on several arguments", "Order"],
+        source: Exercism("e18_weather_ranking"),
+        notes: `<p><code>compare_temperature</code> matches on <em>both</em> arguments at
+once. Each clause handles one combination of units, converts, and calls
+itself again until both are Celsius.</p>
+<p><code>list.sort(cities, _)</code> is a function capture: the
+<code>_</code> marks where the piped value goes.</p>`,
+      ),
+      Lesson(
+        slug: "wine-cellar",
+        title: "Wine cellar",
+        teaches: ["labelled arguments", "guards on fields"],
+        source: Exercism("e19_wine_cellar"),
+        notes: `<p><code>color color: Color</code> gives the parameter an outside label
+(<code>color</code>) and an inside name. Callers write
+<code>wines_of_color(wines, color: White)</code>, so the call reads clearly.</p>
+<p>Clause guards can look into the matched value:
+<code>if head.color == color</code>. Types can also be declared after
+the functions that use them.</p>`,
+      ),
+      Lesson(
+        slug: "gotta-snatch-em-all",
+        title: "Gotta snatch 'em all",
+        teaches: ["sets", "early return", "patterns in clause heads"],
+        source: Exercism("e20_gotta_snatch_em_all"),
+        notes: `<p><code>add_card</code> returns early when the card is already in the
+collection, then carries on with the normal path. Without
+<code>return</code> this would be a <code>case</code> on a boolean.</p>
+<p><code>boring_cards([head | tail]: List(Set(String)))</code> pattern
+matches and annotates the parameter in the same place.</p>`,
+      ),
+    ]),
+    Chapter("Patterns all the way down", [
+      Lesson(
+        slug: "role-playing",
+        title: "Role playing game",
+        teaches: ["partial record patterns", "as", "Option"],
+        source: Exercism("e21_role_playing"),
+        notes: `<p>This one shows off Bea's record patterns. <code>Player(name: None |
+_)</code> matches any player whose name is <code>None</code> and ignores
+the other fields. The <code>| _</code> means "and the rest".</p>
+<p><code>as p</code> keeps the whole value while you take it apart, so
+<code>Player(p | health: 100)</code> can rebuild it with one field changed.
+Guards still apply: <code>revive</code> treats high-level players
+differently.</p>`,
+      ),
+      Lesson(
+        slug: "spring-cleaning",
+        title: "Spring cleaning",
+        teaches: ["let assert", "string prefix patterns"],
+        source: Exercism("e22_spring_cleaning"),
+        notes: `<p><code>Error(v) = problem</code> asserts that <code>problem</code> is an
+error; if it isn't, the program crashes with a clear message. Use this
+when a failure would be a bug.</p>
+<p><code>"Team " &lt;&gt; name</code> is a string prefix pattern, right in a
+function head: the first clause strips the prefix, the second catches every
+other string.</p>`,
+      ),
+      Lesson(
+        slug: "dna-encoding",
+        title: "DNA encoding",
+        teaches: ["bit arrays", "binary literals"],
+        source: Exercism("e23_dna_encoding"),
+        notes: `<p>Each nucleotide fits in two bits. <code>&lt;&lt;acc:bits,
+encode_nucleotide(nucleotide):2&gt;&gt;</code> appends two bits to a bit
+array.</p>
+<p>Decoding runs the other way: every clause of <code>do_decode</code>
+matches two bits off the front with <code>&lt;&lt;0b01:2,
+rest:bits&gt;&gt;</code>. Bit-level parsing ends up looking like a
+table.</p>`,
+      ),
+      Lesson(
+        slug: "newsletter",
+        title: "Newsletter",
+        teaches: ["?", "Hex packages", "files"],
+        source: Exercism("e24_newsletter"),
+        notes: `<p>This one uses <a href="https://hex.pm/packages/simplifile">simplifile</a>,
+a Gleam package from Hex. <code>bea add simplifile</code> puts it in
+<code>bea.toml</code>, and from then on it is an ordinary import.</p>
+<p><code>emails = read_emails(emails_path)?</code> is the <code>?</code>
+operator at its most useful: each step either gives you its value or
+stops the function with its error. The Gleam tab shows the
+<code>use … &lt;- result.try(…)</code> chain you didn't have to write.</p>
+<p>This module is a library with no <code>main</code>, so there is no
+output to show.</p>`,
+      ),
+    ]),
+    Chapter("Records, guards and deriving", [
+      Lesson(
+        slug: "records",
+        title: "Records",
+        teaches: ["type T { … }", "generic records", "record update"],
+        source: Feature("records", []),
+        notes: `<p>A type with a single constructor named like the type can
+list its fields in braces: <code>pub type Point { x: Float, y: Float }</code>
+is exactly <code>pub type Point { Point(x: Float, y: Float) }</code>. The
+<strong>Gleam</strong> tab shows the long form it becomes.</p>
+<p>Everything else works as with the long form: construction
+(<code>Point(0.0, 0.0)</code>, or with labels), patterns like
+<code>Player(name:, level: | _)</code>, and updates like
+<code>Player(player | position: …)</code>.</p>
+<p>A generic record declares its parameters as usual,
+<code>Page(item)</code>, so the meaning of <code>Page(Int)</code> never
+depends on the order of the fields. A type that wraps a value without a
+label, like <code>UserId(Int)</code>, is written in full.</p>`,
+      ),
+      Lesson(
+        slug: "else-guards",
+        title: "Else guards",
+        teaches: ["else", "pattern guards", "?", "use"],
+        source: Feature("else_guards", []),
+        notes: `<p>A guard is an assignment that must match, followed by what
+to return when it doesn't:
+<code>Ok(name) = dict.get(form, "name") else Error(Missing("name"))</code>.
+When the value doesn't match, the function returns what follows
+<code>else</code>, and the rest of the block never runs.</p>
+<p>Guards come in a few shapes. A <strong>boolean guard</strong> is just a
+condition: <code>age &gt;= 18 else Error(TooYoung(age))</code>. A
+<strong>pattern guard</strong> takes any pattern: <code>Ok</code> and
+<code>Error</code>, your own types, lists like <code>[adult | _]</code>.
+With <strong><code>?</code></strong>, the pattern is for the
+<code>Ok</code> value, and <code>else problem -&gt; …</code> binds the
+error, so you can turn it into something else. Any guard can bind what
+didn't match that way.</p>
+<p>Guards are a way to leave a function early without callbacks, next to
+<code>return</code> and <code>?</code>: each check reads top to bottom and
+the code stays flat. The <strong>Gleam</strong> tab shows the nested
+<code>case</code> expressions they become. <code>use</code> still works,
+and it is the right tool for code that wraps the rest of a function, like
+<code>logged</code> here.</p>`,
+      ),
+      Lesson(
+        slug: "deriving",
+        title: "Deriving",
+        teaches: ["@derive", "derivers", "JSON"],
+        source: Feature("deriving", [
+          File(
+            "bea_json/decoder.bea",
+            "features/src/bea_json/decoder.bea",
+            highlight.Bea,
+          ),
+        ]),
+        notes: `<p><code>@derive(decoder, encoder)</code> on a record writes
+functions that follow its fields one by one: <code>user_decoder()</code>
+and <code>user_encoder()</code>, which Bea code calls as
+<code>User.decoder()</code> and <code>User.encoder()</code>. They are
+exactly the code you would write by hand, as the <strong>Gleam</strong> tab
+shows.</p>
+<p>The compiler knows no format. What a derived function does comes from
+the <em>deriver</em>, the imported module that <code>@derive</code> names:
+an ordinary Bea (or Gleam) module that exports <code>record</code>,
+<code>field</code> and <code>done</code>, and a function per type a field
+can have (<code>string</code>, <code>int</code>, <code>list</code>,
+<code>option</code>, …). The <strong>bea_json/decoder.bea</strong> tab is a
+complete one, and its decoders are the standard library's
+<code>decode.Decoder</code>s.</p>
+<p>A field whose type is another record uses that type's function
+(<code>address_decoder()</code>). You get only what you ask for: a type
+that should never be serialised simply doesn't derive an encoder.</p>`,
+      ),
+      Lesson(
+        slug: "functions-through-types",
+        title: "Functions through their type",
+        teaches: ["Type.name()", "hand-written decoders"],
+        source: Feature("type_functions", []),
+        notes: `<p>A type's functions are named after it,
+<code>&lt;type&gt;_&lt;name&gt;</code>, and <code>Type.name</code> reaches
+them through the type: <code>Account.decoder()</code> is
+<code>account_decoder()</code>, and <code>Role.decoder()</code> is
+<code>role_decoder()</code>. Without the parentheses,
+<code>Role.decoder</code> is the function itself.</p>
+<p>Only records can be derived, so the union <code>Role</code> gets a
+decoder written by hand. Because it is named the same way, it fits right
+in: the derived <code>account_decoder</code> uses it for the
+<code>role</code> field.</p>
+<p>This is naming, not methods. The Gleam is the same as with the name
+written out, so Gleam code calls <code>account_decoder()</code> as
+always.</p>`,
+      ),
+      Lesson(
+        slug: "testing",
+        title: "Testing",
+        teaches: ["bea test", "gleeunit", "bea pack"],
+        source: Feature("testing", [
+          File(
+            "test/features_test.gleam",
+            "features/test/features_test.gleam",
+            highlight.Gleam,
+          ),
+          File("bea test", "features/generated/bea_test.out", highlight.Output),
+        ]),
+        notes: `<p>A Bea project's tests live in <code>test/</code>, written in
+Gleam, and <code>bea test</code> runs them: the <code>main</code> of
+<code>test/&lt;package&gt;_test.gleam</code>, here gleeunit's
+(<code>bea add --dev gleeunit</code>). They are built with the rest of the
+project and run from the project root, so a test can read files relative
+to it.</p>
+<p>Tests call Bea modules like any other module:
+<code>testing.slug(…)</code>. A type error in a test points at the test
+file.</p>
+<p>When a program is ready to share, <code>bea pack</code> turns it into a
+single executable that runs without Erlang installed. The
+<a href="../../toolchain/">toolchain page</a> has the details.</p>`,
+      ),
+    ]),
+  ]
+}
+
+/// Every lesson in order, with its chapter's number (from 1) and title.
+pub def in_order() -> List((Lesson, Int, Chapter)) {
+  chapters()
+  |> list.index_map(fn(chapter, i) {
+    list.map(chapter.lessons, fn(lesson) { (lesson, i + 1, chapter) })
+  })
+  |> list.flatten
+}

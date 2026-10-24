@@ -1,0 +1,80 @@
+//// A deriver of JSON encoders: `@derive(encoder)` on `User` defines
+//// `user_encoder()`, a `fn(User) -> Json`.
+////
+//// Conventions: a record is an object with a key per field label, `None`
+//// is `null`, and dictionaries need `String` keys (anything else doesn't
+//// type check).
+
+import gleam/json.{type Json}
+
+pub type Encoder(a) = fn(a) -> Json
+
+/// The fields of a record, as JSON object entries.
+pub opaque type Fields(r) {
+  Fields(entries: fn(r) -> List((String, Json)))
+}
+
+// --- What `@derive(encoder)` calls --------------------------------------------------
+
+pub def record(_constructor: String, fields: fn() -> Fields(r)) -> Encoder(r) {
+  fn(value) { json.object(fields().entries(value)) }
+}
+
+pub def field(
+  label: String,
+  of: Encoder(a),
+  get: fn(r) -> a,
+  next: fn(a) -> Fields(r),
+) -> Fields(r) {
+  Fields(fn(record) {
+    value = get(record)
+    [(label, of(value)) | next(value).entries(record)]
+  })
+}
+
+pub def done(_value: r) -> Fields(r) {
+  Fields(fn(_) { [] })
+}
+
+// --- Encoders for the types fields can have -------------------------------------------
+
+pub def string() -> Encoder(String) {
+  json.string
+}
+
+pub def int() -> Encoder(Int) {
+  json.int
+}
+
+pub def float() -> Encoder(Float) {
+  json.float
+}
+
+pub def bool() -> Encoder(Bool) {
+  json.bool
+}
+
+pub def list(of: Encoder(a)) -> Encoder(List(a)) {
+  fn(values) { json.array(values, of) }
+}
+
+pub def option(of: Encoder(a)) -> Encoder(Option(a)) {
+  fn(value) { json.nullable(value, of) }
+}
+
+pub def dict(
+  _keys: Encoder(String),
+  values: Encoder(v),
+) -> Encoder(Dict(String, v)) {
+  fn(value) { json.dict(value, fn(key) { key }, values) }
+}
+
+// --- Running ------------------------------------------------------------------------
+
+pub def to_json(value: a, encoder: Encoder(a)) -> Json {
+  encoder(value)
+}
+
+pub def to_string(value: a, encoder: Encoder(a)) -> String {
+  encoder(value) |> json.to_string
+}

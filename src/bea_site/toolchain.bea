@@ -1,0 +1,314 @@
+//// The toolchain page: installing bea, its commands, and what a build does.
+
+import bea_site/code
+import bea_site/highlight.{Shell, Text, Toml}
+import bea_site/layout.{type Page, Page}
+import bea_site/links
+import bea_site/markup
+import lustre/attribute.{class, href, id}
+import lustre/element.{type Element}
+import lustre/element/html
+
+pub def page() -> Page(Nil) {
+  Page(
+    title: "Toolchain",
+    description: "Install Bea (a standalone binary for Linux), its commands from bea new to bea pack, and how a build goes from .bea files through Gleam.",
+    root: "../",
+    active: "toolchain",
+    body_class: "toolchain-page",
+    body: [
+      html.div([class("wrap toolchain")], [
+        html.header([class("page-head")], [
+          html.h1([], [html.text("Toolchain")]),
+          markup.raw(
+            "p",
+            [class("section-lede")],
+            "One command, <code>bea</code>, does for a Bea project what <code>gleam</code> does for a Gleam project, plus a few things of its own. Behind it, Gleam does the type checking and generates Erlang or JavaScript.",
+          ),
+        ]),
+        install(),
+        commands(),
+        how_it_works(),
+        layout_section(),
+        test_and_pack(),
+      ]),
+    ],
+    modules: [],
+  )
+}
+
+// --- Tables ------------------------------------------------------------------------------
+
+/// A table of authored HTML cells; the first column is the row's header.
+def table(
+  caption: String,
+  headers: List(String),
+  rows: List(List(String)),
+) -> Element(msg) {
+  html.div([class("table-scroll"), attribute.tabindex(0)], [
+    html.table([class("spec")], [
+      html.caption([class("visually-hidden")], [html.text(caption)]),
+      html.thead([], [
+        html.tr(
+          [],
+          list.map(headers, fn(h) {
+            html.th([attribute.scope("col")], [html.text(h)])
+          }),
+        ),
+      ]),
+      html.tbody(
+        [],
+        list.map(rows, fn(row) {
+          case row {
+            [first | rest] ->
+              html.tr([], [
+                markup.raw("th", [attribute.scope("row")], first) |
+                list.map(rest, markup.td)
+              ])
+            [] -> html.tr([], [])
+          }
+        }),
+      ),
+    ]),
+  ])
+}
+
+def section(
+  slug: String,
+  title: String,
+  children: List(Element(msg)),
+) -> Element(msg) {
+  html.section(
+    [class("tool-section"), attribute.aria_labelledby(slug)],
+    [html.h2([id(slug)], [html.text(title)]) | children],
+  )
+}
+
+// --- Install -----------------------------------------------------------------------------
+
+def install() -> Element(msg) {
+  section("install", "Install", [
+    html.div([class("install-grid")], [
+      html.div([class("prose")], [
+        markup.p(
+          "Each release comes with a standalone <code>bea</code> for <strong>Linux (x86-64)</strong>, for now the only platform with a binary. It carries its own Erlang runtime, so the binary itself needs nothing else installed.",
+        ),
+        markup.p(
+          "Building projects needs <a href=\"" <> links.gleam <> "\">Gleam</a>, and Erlang/OTP for the Erlang target or Node for JavaScript: <code>bea</code> hands the generated Gleam to them.",
+        ),
+        html.p([], [
+          html.a([class("btn btn-primary"), href(links.release)], [
+            html.text("Bea #{links.release_version} on GitHub"),
+          ]),
+          html.text(" "),
+          html.a([class("btn btn-quiet"), href(links.releases)], [
+            html.text("All releases"),
+          ]),
+        ]),
+      ]),
+      code.file(
+        "install-sh",
+        "Linux, x86-64",
+        Shell,
+        "$ mkdir -p ~/.local/bin\n$ curl -fsSL -o ~/.local/bin/bea \\\n    " <> links.linux_binary <> "\n$ chmod +x ~/.local/bin/bea\n$ bea --version\nbea " <> links.release_version,
+      ),
+    ]),
+    table(
+      "What you need",
+      ["", "To run bea", "To build a project"],
+      [
+        ["Linux, x86-64", "the release binary", "the release binary"],
+        ["Gleam", "no", "yes: Bea compiles to Gleam, Gleam does the rest"],
+        [
+          "Erlang/OTP",
+          "no, it's built in",
+          "for the Erlang target (the default)",
+        ],
+        ["Node, Bun or Deno", "no", "for <code>--target javascript</code>"],
+        [
+          "Other platforms",
+          "no binary yet",
+          "build Bea from source (<a href=\"" <> links.repo <> "/blob/main/docs/self-hosting.md\">docs/self-hosting.md</a>)",
+        ],
+      ],
+    ),
+  ])
+}
+
+// --- Commands ------------------------------------------------------------------------------
+
+def commands() -> Element(msg) {
+  section("commands", "Commands", [
+    markup.p(
+      "Flags Bea doesn't know are passed on to Gleam, and everything Gleam prints is rewritten to point at your <code>.bea</code> files.",
+    ),
+    table("bea commands", ["Command", "What it does"], [
+      ["<code>bea new NAME</code>", "Create a project"],
+      [
+        "<code>bea add PKG...</code>",
+        "Add Hex dependencies (<code>--dev</code> for dev ones), e.g. <code>bea add lustre gleam_json</code>",
+      ],
+      [
+        "<code>bea remove</code>, <code>update</code>, <code>deps</code>",
+        "Remove, update and inspect dependencies",
+      ],
+      ["<code>bea check</code>", "Type check"],
+      [
+        "<code>bea build</code>",
+        "Build (<code>--target javascript</code>, <code>--warnings-as-errors</code>, …)",
+      ],
+      [
+        "<code>bea run</code>",
+        "Run a module's <code>main</code>, from the project root: the project's, another module's (<code>-m</code>) or a Gleam tool's",
+      ],
+      [
+        "<code>bea test</code>",
+        "Run the tests: the <code>main</code> of <code>test/&lt;package&gt;_test.gleam</code> (gleeunit or any runner)",
+      ],
+      [
+        "<code>bea format</code>",
+        "Format <code>.bea</code> files (<code>--check</code>, <code>--imports</code> to organise imports)",
+      ],
+      ["<code>bea shell</code>", "An interactive Bea shell in the project"],
+      ["<code>bea transpile FILE.bea</code>", "Print the Gleam a file becomes"],
+      [
+        "<code>bea transpile --out DIR</code>",
+        "Write the project out as a plain Gleam project, to leave Bea",
+      ],
+      [
+        "<code>bea pack</code>",
+        "Package the project into one standalone executable, with <a href=\"" <> links.gleepack <> "\">gleepack</a>",
+      ],
+      [
+        "<code>bea export</code>",
+        "Gleam's exports: <code>erlang-shipment</code>, <code>escript</code>, …",
+      ],
+      [
+        "<code>bea publish</code>, <code>bea hex</code>",
+        "Publish to Hex, as the generated Gleam package",
+      ],
+      ["<code>bea lsp</code>", "The language server, for editors"],
+      ["<code>bea clean</code>", "Delete <code>.beabuild/</code>"],
+    ]),
+  ])
+}
+
+// --- How it works --------------------------------------------------------------------------
+
+def how_it_works() -> Element(msg) {
+  section("how", "How a build works", [
+    markup.p(
+      "Bea never generates Erlang or JavaScript itself. It turns your <code>.bea</code> files into a Gleam project, lets Gleam build it, and translates what Gleam says back to your source.",
+    ),
+    html.ol([class("steps")], [
+      markup.li(
+        "<strong>Sync.</strong> <code>bea</code> reads <code>bea.toml</code> and writes the Gleam project in <code>.beabuild/</code>: <code>gleam.toml</code>, every changed <code>.bea</code> file compiled to a <code>.gleam</code> file with a source map, and Gleam modules, FFI files and tests copied as they are.",
+      ),
+      markup.li(
+        "<strong>Compile.</strong> Each <code>.bea</code> file goes through Bea's compiler, written in Bea: the stages below. Bea's own syntax errors are reported here.",
+      ),
+      markup.li(
+        "<strong>Gleam.</strong> <code>gleam build</code> (or <code>check</code>, <code>run</code>, <code>test</code>) runs on <code>.beabuild/</code>: dependencies from Hex, type checking, then Erlang or JavaScript.",
+      ),
+      markup.li(
+        "<strong>Map back.</strong> Gleam's errors and warnings, <code>echo</code> output and stack traces come back through the source maps, pointing at your <code>.bea</code> lines with the Bea code in the snippet.",
+      ),
+    ]),
+    code.file(
+      "pipeline",
+      "Inside the compiler",
+      Text,
+      ".bea ──lexer──▶ tokens ──parser──▶ AST ──deriving──▶ AST ──lower──▶ AST ──codegen──▶ .gleam + source map\n                (spans,            (Pratt,        (@derive          (cond, ?, else,    (pretty printer\n                 comments)          recovery)      → functions,      returns,           with marks)\n                                                   Type.f → f)       clauses)",
+    ),
+    table("Compiler stages", ["Stage", "What it does"], [
+      [
+        "<code>bea/lexer</code>",
+        "Tokens with exact spans, comments kept, string interpolation",
+      ],
+      [
+        "<code>bea/parser</code>",
+        "Recursive descent with Gleam's precedence table, and error recovery per definition",
+      ],
+      [
+        "<code>bea/deriving</code>",
+        "<code>@derive(m)</code> on a record → ordinary functions calling the deriver module <code>m</code>",
+      ],
+      [
+        "<code>bea/associated</code>",
+        "<code>Type.name</code> → the function <code>&lt;type&gt;_&lt;name&gt;</code> it names",
+      ],
+      [
+        "<code>bea/lower</code>",
+        "<code>cond</code>, <code>else</code> guards, <code>?</code>, early returns and multi-clause functions → Gleam's constructs",
+      ],
+      [
+        "<code>bea/codegen</code>",
+        "Prints Gleam: scope-aware imports, <code>let</code> or <code>let assert</code>, positions for the source map",
+      ],
+      [
+        "<code>bea/formatter</code>",
+        "<code>bea format</code>, which checks its output parses back to the same program",
+      ],
+    ]),
+  ])
+}
+
+def layout_section() -> Element(msg) {
+  section("layout", "A project", [
+    table("Project layout", ["Path", "What it is"], [
+      [
+        "<code>bea.toml</code>",
+        "The project: name, version, target, dependencies. Like <code>gleam.toml</code>, plus <code>[tools.gleepack]</code>",
+      ],
+      ["<code>manifest.toml</code>", "Locked dependency versions"],
+      ["<code>src/*.bea</code>", "Bea modules"],
+      [
+        "<code>src/*.gleam</code>, <code>*.erl</code>, <code>*.mjs</code>",
+        "Gleam modules and FFI files, next to the Bea ones",
+      ],
+      [
+        "<code>test/*.gleam</code>",
+        "Tests, in Gleam, run by <code>bea test</code>",
+      ],
+      [
+        "<code>.beabuild/</code>",
+        "The generated Gleam project (don't commit it)",
+      ],
+      ["<code>build/</code>", "Where <code>bea pack</code> puts executables"],
+    ]),
+  ])
+}
+
+def test_and_pack() -> Element(msg) {
+  section("ship", "Testing and shipping", [
+    html.div([class("install-grid")], [
+      html.div([class("prose")], [
+        html.h3([], [html.code([], [html.text("bea test")])]),
+        markup.p(
+          "Runs the <code>main</code> of <code>test/&lt;package&gt;_test.gleam</code>, built with the rest of the project, from the project root, so tests can read files relative to it. Tests are Gleam and call Bea modules like any other. The <a href=\"../tour/testing/\">testing lesson</a> has a complete example.",
+        ),
+        html.h3([], [html.code([], [html.text("bea pack")])]),
+        markup.p(
+          "Packages the project into one executable with <a href=\"" <> links.gleepack <> "\">gleepack</a>: the compiled project, its dependencies and a small Erlang runtime in a single file that runs on machines without Erlang. It suits CLIs, TUIs and dev tools on the Erlang target. The <code>bea</code> binary itself is made this way, by <code>bea pack</code> in Bea's own repository.",
+        ),
+        markup.p(
+          "gleepack is the <code>gleepack</code> on your PATH (from its releases), the one <code>BEA_GLEEPACK</code> names, or a dev dependency of the project.",
+        ),
+      ]),
+      html.div([], [
+        code.file(
+          "pack-sh",
+          "Terminal",
+          Shell,
+          "$ bea test\n$ bea pack                # build/<package>\n$ bea pack -o dist/app    # somewhere else\n$ bea pack -m app/cli     # another main\n$ bea pack -t amd64-linux-otp-29.1.1 \\\n    -t aarch64-macos-otp-29.1.1",
+        ),
+        code.file(
+          "pack-toml",
+          "bea.toml",
+          Toml,
+          "[dev_dependencies]\ngleeunit = \">= 1.0.0 and < 2.0.0\"\ngleepack = { git = \"https://github.com/yoshi-monster/gleepack.git\", ref = \"main\" }\n\n[tools.gleepack]\noutput = \"dist/app\"\nmodule = \"app/cli\"",
+        ),
+      ]),
+    ]),
+  ])
+}

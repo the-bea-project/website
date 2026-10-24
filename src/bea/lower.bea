@@ -1,0 +1,1711 @@
+//// Lowering: rewrites Bea-only constructs into constructs that map directly
+//// onto Gleam. The output is still a `bea/ast` tree, so the code generator
+//// stays a straightforward printer.
+////
+//// Passes, in order, for every function body (and anonymous function body):
+////
+//// 1. `desugar`: `cond` becomes an `if` chain; `a and b?` / `a or b?`
+////    become `if`s so the `?` only runs when the right side is evaluated;
+////    anonymous function parameters that are patterns get destructured.
+//// 2. `hoist`: every `?` is moved out of its expression into a preceding
+////    `use x <- result.try(...)` statement.
+//// 3. `returns`: early `return`s are turned into nested `case`s,
+////    `bool.guard`s, or continuation closures, so every return ends up in tail
+////    position.
+////
+//// Multi-clause functions are then turned into one function whose body is a
+//// `case` over the parameters.
+////
+//// Internal helper functions are referenced through placeholder variables
+//// whose names start with `$` (e.g. `$result.try`); the code generator
+//// resolves them to properly imported names.
+
+import bea/ast.{
+  type CaseClause,
+  type Clause,
+  type Expr,
+  type Item,
+  type Pattern,
+  type Statement,
+}
+import bea/diagnostic.{type Diagnostic}
+import bea/span.{type Span}
+import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/string
+
+pub const result_try = "$result.try"
+
+pub const bool_guard = "$bool.guard"
+
+pub const bool_lazy_guard = "$bool.lazy_guard"
+
+pub def module(module: ast.Module) -> (ast.Module, List(Diagnostic)) {
+  results = list.map(module.items, item)
+  items = list.map(results, fn(r) { r.0 })
+  errors = list.flat_map(results, fn(r) { r.1 })
+  errors = list.append(errors, list.flat_map(items, leftover_returns))
+  errors = list.append(errors, list.flat_map(items, leftover_tries))
+  (ast.Module(module | items: items), errors)
+}
+
+def item(it: Item) -> (Item, List(Diagnostic)) {
+  case it {
+    ast.Function(| _) -> function(it)
+    ast.Const(| _) -> (ast.Const(it | value: desugar_expr(it.value)), [])
+    _ -> (it, [])
+  }
+}
+
+// --- Functions -----------------------------------------------------------------
+
+def is_external(clause: Clause) -> Bool {
+  list.any(clause.attributes, fn(a) { a.name == "external" })
+}
+
+def function(it: Item) -> (Item, List(Diagnostic)) {
+  ast.Function(span, name, name_span, clauses) = it
+  heads = list.filter(clauses, fn(c) { c.body == None and not is_external(c) })
+  bodies = list.filter(clauses, fn(c) { c.body != None })
+  externals = list.filter(clauses, is_external)
+  errors = []
+
+  // All clauses must agree on visibility.
+  errors = case clauses {
+    [first | rest] -> case list.find(rest, fn(c) {
+      c.publicity != first.publicity
+    }) {
+      Ok(c) ->
+        [
+          diagnostic.error(
+            "Inconsistent visibility",
+            c.name_span,
+            "every clause of `" <> name <> "` must be `pub`, or none of them",
+          ) |
+          errors
+        ]
+      Error(_) -> errors
+    }
+    [] -> errors
+  }
+
+  // Annotations in clauses must agree with each other (and the head).
+  errors =
+    list.fold(clauses, (errors, dict.new(), None), fn(acc, c) {
+      (errors, seen, seen_return) = acc
+      (errors, seen) = list.index_fold(c.params, (errors, seen), fn(acc, p, i) {
+        (errors, seen) = acc
+        case p.annotation {
+          None -> acc
+          Some(t) -> {
+            key = type_key(t)
+            case dict.get(seen, i) {
+              Ok(previous) if previous != key ->
+                (
+                  [
+                    diagnostic.error(
+                      "Conflicting annotations",
+                      t.span,
+                      "an earlier clause of `" <> name <> "` gives this parameter the type " <> previous,
+                    ) |
+                    errors
+                  ],
+                  seen,
+                )
+              Ok(_) -> acc
+              Error(_) -> (errors, dict.insert(seen, i, key))
+            }
+          }
+        }
+      })
+      return_key = option.map(c.return_type, type_key)
+      (errors, seen_return) = case c.return_type, seen_return {
+        Some(t), Some(previous) if Some(previous) != return_key ->
+          (
+            [
+              diagnostic.error(
+                "Conflicting annotations",
+                t.span,
+                "an earlier clause of `" <> name <> "` returns " <> previous,
+              ) |
+              errors
+            ],
+            seen_return,
+          )
+        Some(t), None -> (errors, Some(type_key(t)))
+        _, _ -> (errors, seen_return)
+      }
+      (errors, seen, seen_return)
+    })
+    |> fn(acc) { acc.0 }
+
+  // Structural checks.
+  errors = case heads {
+    [_, second | _] ->
+      [
+        diagnostic.error(
+          "Duplicate function head",
+          second.span,
+          "`" <> name <> "` already has a signature",
+        ) |
+        errors
+      ]
+    [head] -> case clauses {
+      [first | _] if first == head -> errors
+      _ ->
+        [
+          diagnostic.error(
+            "Misplaced function head",
+            head.span,
+            "a body-less signature must come before the clauses",
+          ) |
+          errors
+        ]
+    }
+    [] -> errors
+  }
+  errors = case externals, clauses {
+    [_], [_] -> errors
+    [], _ -> errors
+    [ext | _], _ ->
+      [
+        diagnostic.error(
+          "External function with clauses",
+          ext.span,
+          "an `@external` function must be a single `def`",
+        ) |
+        errors
+      ]
+  }
+  errors = case bodies, externals {
+    [], [] ->
+      [
+        diagnostic.error(
+          "Function without a body",
+          name_span,
+          "`" <> name <> "` is declared but never defined",
+        )
+        |> diagnostic.with_hint(
+          "Add a clause with a body, or an `@external(...)` attribute.",
+        ) |
+        errors
+      ]
+    _, _ -> errors
+  }
+  arity = case clauses {
+    [first | _] -> list.length(first.params)
+    [] -> 0
+  }
+  errors = list.fold(clauses, errors, fn(errors, c) {
+    case list.length(c.params) == arity {
+      True -> errors
+      False ->
+        [
+          diagnostic.error(
+            "Clauses with different arities",
+            c.span,
+            "this clause takes " <> int.to_string(
+              list.length(c.params),
+            ) <> " argument(s) but the first takes " <> int.to_string(arity),
+          ) |
+          errors
+        ]
+    }
+  })
+
+  case errors {
+    [_ | _] -> (it, list.reverse(errors))
+    [] -> {
+      merged = merge_clauses(span, name_span, clauses, heads, bodies, arity)
+      (ast.Function(span, name, name_span, [merged]), [])
+    }
+  }
+}
+
+def merge_clauses(
+  span: Span,
+  name_span: Span,
+  clauses: List(Clause),
+  heads: List(Clause),
+  bodies: List(Clause),
+  arity: Int,
+) -> Clause {
+  publicity = case list.any(clauses, fn(c) { c.publicity == ast.Public }) {
+    True -> ast.Public
+    False -> ast.Private
+  }
+  doc = list.flat_map(clauses, fn(c) { c.doc })
+  attributes = list.flat_map(clauses, fn(c) { c.attributes }) |> list.unique
+  return_type = list.find_map(clauses, fn(c) {
+    option.to_result(c.return_type, Nil)
+  })
+  return_type = option.from_result(return_type)
+
+  case bodies {
+    // External function without a fallback body.
+    [] -> {
+      [c | _] = clauses
+      ast.Clause(c | publicity:, doc:, attributes:, return_type:)
+    }
+    [only] -> case list.all(only.params, simple_param) {
+      True -> {
+        params = list.index_map(only.params, fn(p, i) {
+          ast.Param(
+            p |
+            label: first_some(clauses, i, fn(p) { p.label }),
+            annotation: first_some(clauses, i, fn(p) { p.annotation }),
+          )
+        })
+        ast.Clause(
+          span:,
+          name_span:,
+          publicity:,
+          doc:,
+          attributes:,
+          return_type:,
+          params:,
+          guard: None,
+          body: case only.guard {
+            None -> Some(body(option.unwrap(only.body, [])))
+            Some(g) ->
+              Some([
+                ast.Expression(
+                  ast.If(
+                    only.span,
+                    g,
+                    body(option.unwrap(only.body, [])),
+                    Some([
+                      ast.Expression(
+                        ast.Panic(
+                          only.span,
+                          Some(
+                            ast.String(only.span, [
+                              ast.Text("No clause matched", only.span),
+                            ]),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              ])
+            // A guard on a single clause: fall through to a panic.
+          },
+        )
+      }
+      False ->
+        to_case(
+          span,
+          name_span,
+          clauses,
+          heads,
+          bodies,
+          arity,
+          publicity,
+          doc,
+          attributes,
+          return_type,
+        )
+    }
+    _ ->
+      to_case(
+        span,
+        name_span,
+        clauses,
+        heads,
+        bodies,
+        arity,
+        publicity,
+        doc,
+        attributes,
+        return_type,
+      )
+  }
+}
+
+def simple_param(p: ast.Param) -> Bool {
+  case p.pattern {
+    ast.PVar(| _) | ast.PDiscard(| _) -> True
+    _ -> False
+  }
+}
+
+def first_some(
+  clauses: List(Clause),
+  i: Int,
+  f: fn(ast.Param) -> Option(a),
+) -> Option(a) {
+  list.find_map(clauses, fn(c) {
+    case list.drop(c.params, i) {
+      [p | _] -> option.to_result(f(p), Nil)
+      [] -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// The variable name at a parameter position if *every* clause binds the same
+/// plain variable there (so it needn't be matched on).
+def shared_name(bodies: List(Clause), i: Int) -> Option(String) {
+  names = list.map(bodies, fn(c) {
+    case list.drop(c.params, i) {
+      [ast.Param(pattern: ast.PVar(_, n) | _) | _] -> Some(n)
+      _ -> None
+    }
+  })
+  case names {
+    [Some(n) | rest] -> case list.all(rest, fn(x) { x == Some(n) }) {
+      True -> Some(n)
+      False -> None
+    }
+    _ -> None
+  }
+}
+
+def to_case(
+  span: Span,
+  name_span: Span,
+  clauses: List(Clause),
+  heads: List(Clause),
+  bodies: List(Clause),
+  arity: Int,
+  publicity: ast.Publicity,
+  doc: List(String),
+  attributes: List(ast.Attribute),
+  return_type: Option(ast.Type),
+) -> Clause {
+  positions = int_range(arity)
+  shared = list.map(positions, fn(i) { (i, shared_name(bodies, i)) })
+  matched =
+    list.filter(shared, fn(s) { s.1 == None }) |> list.map(fn(s) { s.0 })
+  // Gleam's `case` needs at least one subject.
+  matched = case matched {
+    [] -> positions
+    _ -> matched
+  }
+  param_name = fn(i) {
+    case list.contains(matched, i), list.key_find(shared, i) {
+      False, Ok(Some(n)) -> n
+      _, _ -> "arg_" <> int.to_string(i)
+    }
+  }
+  params = list.map(positions, fn(i) {
+    ast.Param(
+      span: name_span,
+      label: first_some(clauses, i, fn(p) { p.label }),
+      pattern: ast.PVar(name_span, param_name(i)),
+      annotation: first_some(clauses, i, fn(p) { p.annotation }),
+    )
+  })
+  subjects = list.map(matched, fn(i) { ast.Var(name_span, param_name(i)) })
+  case_clauses = list.map(bodies, fn(c) {
+    patterns = list.map(matched, fn(i) {
+      case list.drop(c.params, i) {
+        [p | _] -> p.pattern
+        [] -> ast.PDiscard(c.span, "_")
+      }
+    })
+    stmts = body(option.unwrap(c.body, []))
+    ast.CaseClause(c.span, [patterns], c.guard, ast.Block(c.span, stmts))
+  })
+  first = case heads {
+    [h | _] -> h
+    [] -> {
+      [c | _] = clauses
+      c
+    }
+  }
+  ast.Clause(
+    span:,
+    doc:,
+    attributes:,
+    publicity:,
+    name_span:,
+    params:,
+    return_type:,
+    guard: None,
+    body: Some([ast.Expression(ast.Case(span, subjects, case_clauses))]),
+  )
+  |> fn(c) { ast.Clause(c | span: first.span |> span.merge(span)) }
+}
+
+/// The full lowering pipeline for a function or anonymous function body.
+pub def body(stmts: List(Statement)) -> List(Statement) {
+  stmts
+  |> desugar_block
+  |> hoist_block(Tail)
+  |> returns
+}
+
+// --- 1. Desugaring -------------------------------------------------------------
+
+def desugar_stmts(stmts: List(Statement)) -> List(Statement) {
+  desugar_block(stmts)
+}
+
+/// Desugars a block. A guard takes the rest of the block with it: it
+/// becomes the matching branch of a `case`, whose other branch exits.
+def desugar_block(stmts: List(Statement)) -> List(Statement) {
+  case stmts {
+    [] -> []
+    [ast.Guard(s, pattern, annotation, value, otherwise) | rest] ->
+      [
+        ast.Expression(
+          guard_case(
+            s,
+            pattern,
+            annotation,
+            value,
+            otherwise,
+            desugar_block(rest),
+          ),
+        ),
+      ]
+    [stmt | rest] -> [desugar_stmt(stmt) | desugar_block(rest)]
+  }
+}
+
+/// ```text
+/// pattern = value else fallback     case value {
+/// rest                          =>    pattern -> { rest }
+///                                     _ -> { return fallback }
+///                                   }
+/// ```
+///
+/// `value?` matches `Ok(pattern)` / `Error(binding)`; a guard without a
+/// pattern is a boolean one (`True`). The `return` makes the fallback leave
+/// the function from anywhere, like `?` does; the return lowering pass turns
+/// it back into a plain value where it is in tail position.
+def guard_case(
+  s: Span,
+  pattern: Option(Pattern),
+  annotation: Option(ast.Type),
+  value: Expr,
+  otherwise: ast.Otherwise,
+  rest: List(Statement),
+) -> Expr {
+  os = otherwise.span
+  discard = fn(at) { ast.PDiscard(at, "_") }
+  binding = option.lazy_unwrap(otherwise.binding, fn() { discard(os) })
+  constructor = fn(at, name, args: List(Pattern)) {
+    ast.PConstructor(
+      at,
+      None,
+      name,
+      list.map(args, fn(a) { ast.PatternArg(a.span, None, Some(a)) }),
+      False,
+    )
+  }
+  (subject, matched, unmatched) = case value, pattern {
+    ast.Try(_, inner), _ ->
+      (
+        inner,
+        constructor(s, "Ok", [
+          option.lazy_unwrap(pattern, fn() { discard(s) }),
+        ]),
+        constructor(os, "Error", [binding]),
+      )
+    _, Some(p) -> (value, p, binding)
+    _, None ->
+      (
+        value,
+        constructor(s, "True", []),
+        option.lazy_unwrap(otherwise.binding, fn() {
+          constructor(os, "False", [])
+        }),
+      )
+  }
+  rest = case annotation, pattern {
+    Some(t), Some(ast.PVar(ps, name)) ->
+      [ast.Assign(ps, ast.PVar(ps, name), Some(t), ast.Var(ps, name)) | rest]
+    _, _ -> rest
+  }
+  // A guard ending its block: the block's value is the bound variable (or
+  // Nil), like an assignment's.
+  rest = case rest {
+    [] -> case pattern {
+      Some(ast.PVar(ps, name)) -> [ast.Expression(ast.Var(ps, name))]
+      _ -> [ast.Expression(ast.Constructor(s, None, "Nil"))]
+    }
+    _ -> rest
+  }
+  ast.Case(s, [desugar_expr(subject)], [
+    ast.CaseClause(s, [[matched]], None, ast.Block(s, rest)),
+    ast.CaseClause(
+      os,
+      [[unmatched]],
+      None,
+      ast.Block(os, exit(desugar_block(otherwise.body), os)),
+    ),
+  ])
+}
+
+/// Make a fallback leave the function: its last expression is returned.
+def exit(stmts: List(Statement), s: Span) -> List(Statement) {
+  case always_returns(stmts) {
+    True -> stmts
+    False -> case list.reverse(stmts) {
+      [ast.Expression(e) | before] ->
+        list.reverse([ast.Return(e.span, e) | before])
+      _ -> list.append(stmts, [ast.Return(s, ast.Constructor(s, None, "Nil"))])
+    }
+  }
+}
+
+def desugar_stmt(stmt: Statement) -> Statement {
+  case stmt {
+    ast.Assign(s, p, t, v) -> ast.Assign(s, p, t, desugar_expr(v))
+    ast.Expression(e) -> ast.Expression(desugar_expr(e))
+    ast.Return(s, e) -> ast.Return(s, desugar_expr(e))
+    ast.Use(s, ps, call) -> ast.Use(s, ps, desugar_expr(call))
+    // The message is only evaluated if the assertion fails, so a `?` in it
+    // must not be hoisted in front of the assertion.
+    ast.Assert(s, e, Some(m)) -> case contains_try(m) {
+      True ->
+        ast.Expression(
+          ast.If(
+            s,
+            ast.Not(s, desugar_expr(e)),
+            [ast.Expression(ast.Panic(s, Some(desugar_expr(m))))],
+            None,
+          ),
+        )
+      False -> ast.Assert(s, desugar_expr(e), Some(desugar_expr(m)))
+    }
+    ast.Assert(s, e, None) -> ast.Assert(s, desugar_expr(e), None)
+    ast.Guard(| _) -> {
+      [lowered] = desugar_block([stmt])
+      lowered
+    }
+  }
+}
+
+def desugar_expr(e: Expr) -> Expr {
+  d = desugar_expr
+  case e {
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) | ast.Hole(| _) ->
+      e
+    ast.String(s, parts) ->
+      ast.String(
+        s,
+        list.map(parts, fn(p) {
+          case p {
+            ast.Interpolation(x, ps) -> ast.Interpolation(d(x), ps)
+            _ -> p
+          }
+        }),
+      )
+    ast.FieldAccess(s, b, f, fs) -> ast.FieldAccess(s, d(b), f, fs)
+    ast.TupleIndex(s, b, i) -> ast.TupleIndex(s, d(b), i)
+    ast.Call(s, f, args) -> ast.Call(s, d(f), list.map(args, desugar_arg))
+    ast.RecordUpdate(s, c, b, args) ->
+      ast.RecordUpdate(s, c, d(b), list.map(args, desugar_arg))
+    ast.Tuple(s, es) -> ast.Tuple(s, list.map(es, d))
+    ast.List(s, es, t) -> ast.List(s, list.map(es, d), option.map(t, d))
+    ast.Map(s, b, pairs) ->
+      ast.Map(
+        s,
+        option.map(b, d),
+        list.map(pairs, fn(kv) { (d(kv.0), d(kv.1)) }),
+      )
+    ast.Fn(s, params, ret, stmts) -> anonymous_fn(s, params, ret, stmts)
+    ast.FnClauses(s, clauses) -> {
+      // Create a unique, non-discard variable name
+      arg_name = "bea_param_" <> int.to_string(s.start)
+      arg_var = ast.Var(s, arg_name)
+      param = ast.FnParam(s, ast.PVar(s, arg_name), None)
+
+      // Desugar the inner case clauses recursively so ? and return work
+      d_clauses = list.map(clauses, fn(c) {
+        ast.CaseClause(
+          c |
+          guard: option.map(c.guard, desugar_expr),
+          body: desugar_expr(c.body),
+        )
+      })
+
+      body = [ast.Expression(ast.Case(s, [arg_var], d_clauses))]
+      ast.Fn(s, [param], None, body)
+    }
+    ast.Block(s, stmts) -> ast.Block(s, desugar_stmts(stmts))
+    ast.If(s, c, t, el) ->
+      ast.If(s, d(c), desugar_stmts(t), option.map(el, desugar_stmts))
+    ast.Cond(s, clauses) -> cond_(s, clauses)
+    ast.Case(s, subjects, clauses) ->
+      ast.Case(
+        s,
+        list.map(subjects, d),
+        list.map(clauses, fn(c) {
+          ast.CaseClause(c | guard: option.map(c.guard, d), body: d(c.body))
+        }),
+      )
+    ast.BinaryOp(s, ast.And, l, r) -> case contains_try(r) {
+      True ->
+        ast.If(
+          s,
+          d(l),
+          [ast.Expression(d(r))],
+          Some([ast.Expression(ast.Constructor(s, None, "False"))]),
+        )
+      False -> ast.BinaryOp(s, ast.And, d(l), d(r))
+    }
+    ast.BinaryOp(s, ast.Or, l, r) -> case contains_try(r) {
+      True ->
+        ast.If(
+          s,
+          d(l),
+          [ast.Expression(ast.Constructor(s, None, "True"))],
+          Some([ast.Expression(d(r))]),
+        )
+      False -> ast.BinaryOp(s, ast.Or, d(l), d(r))
+    }
+    ast.BinaryOp(s, op, l, r) -> ast.BinaryOp(s, op, d(l), d(r))
+    ast.Negate(s, x) -> ast.Negate(s, d(x))
+    ast.NegateFloat(s, x) -> ast.NegateFloat(s, d(x))
+    ast.Not(s, x) -> ast.Not(s, d(x))
+    ast.Echo(s, x, m) -> ast.Echo(s, option.map(x, d), option.map(m, d))
+    ast.Try(s, x) -> ast.Try(s, d(x))
+    ast.Panic(s, m) -> ast.Panic(s, option.map(m, d))
+    ast.Todo(s, m) -> ast.Todo(s, option.map(m, d))
+    ast.BitArray(s, segs) ->
+      ast.BitArray(
+        s,
+        list.map(segs, fn(seg) {
+          ast.Segment(
+            seg |
+            value: d(seg.value),
+            options: list.map(seg.options, fn(o) {
+              ast.SegmentOption(o | arg: option.map(o.arg, d))
+            }),
+          )
+        }),
+      )
+  }
+}
+
+def desugar_arg(a: ast.Arg) -> ast.Arg {
+  ast.Arg(a | value: option.map(a.value, desugar_expr))
+}
+
+def cond_(s: Span, clauses: List(ast.CondClause)) -> Expr {
+  case clauses {
+    [] ->
+      ast.Panic(s, Some(ast.String(s, [ast.Text("No cond clause matched", s)])))
+    [ast.CondClause(_, ast.Constructor(_, None, "True"), body) | _] | [ast.CondClause(_, ast.Hole(_), body) | _] ->
+      desugar_expr(body)
+    [ast.CondClause(cs, c, body) | rest] ->
+      ast.If(
+        cs,
+        desugar_expr(c),
+        [ast.Expression(desugar_expr(body))],
+        Some([ast.Expression(cond_(s, rest))]),
+      )
+  }
+}
+
+def anonymous_fn(
+  s: Span,
+  params: List(ast.FnParam),
+  ret: Option(ast.Type),
+  stmts: List(Statement),
+) -> Expr {
+  // Gleam anonymous functions only take names; destructure patterns inside.
+  (params, binds) =
+    list.map(params, fn(p) {
+      case p.pattern {
+        ast.PVar(| _) | ast.PDiscard(| _) -> (p, [])
+        pat -> {
+          name = "bea_param_" <> int.to_string(p.span.start)
+          (
+            ast.FnParam(
+              p |
+              pattern: ast.PVar(p.span, name),
+              annotation: p.annotation,
+            ),
+            [ast.Assign(p.span, pat, None, ast.Var(p.span, name))],
+          )
+        }
+      }
+    })
+    |> list.unzip
+  ast.Fn(s, params, ret, body(list.append(list.flatten(binds), stmts)))
+}
+
+def contains_try(e: Expr) -> Bool {
+  case e {
+    ast.Try(| _) -> True
+    ast.Fn(| _) -> False
+    _ -> list.any(children(e), contains_try)
+  }
+}
+
+/// Direct sub-expressions, excluding statement bodies.
+def children(e: Expr) -> List(Expr) {
+  case e {
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) | ast.Hole(| _) ->
+      []
+    ast.String(_, parts) ->
+      list.filter_map(parts, fn(p) {
+        case p {
+          ast.Interpolation(x, _) -> Ok(x)
+          _ -> Error(Nil)
+        }
+      })
+    ast.FieldAccess(base: | _) | ast.TupleIndex(base: | _) -> [base]
+    ast.Call(_, f, args) -> [f | arg_values(args)]
+    ast.RecordUpdate(_, c, b, args) -> [c, b | arg_values(args)]
+    ast.Tuple(_, es) -> es
+    ast.List(_, es, t) -> list.append(es, opt_list(t))
+    ast.Map(_, b, pairs) ->
+      list.append(opt_list(b), list.flat_map(pairs, fn(kv) { [kv.0, kv.1] }))
+    ast.Fn(| _) | ast.FnClauses(| _) -> []
+    ast.Block(_, stmts) -> list.flat_map(stmts, statement_exprs)
+    ast.If(_, c, t, el) ->
+      [
+        c |
+        list.flat_map(list.append(t, option.unwrap(el, [])), statement_exprs)
+      ]
+    ast.Cond(_, clauses) ->
+      list.flat_map(clauses, fn(c) { [c.condition, c.body] })
+    ast.Case(_, subjects, clauses) ->
+      list.append(
+        subjects,
+        list.flat_map(clauses, fn(c) {
+          list.append(opt_list(c.guard), [c.body])
+        }),
+      )
+    ast.BinaryOp(_, _, l, r) -> [l, r]
+    ast.Negate(_, x) | ast.NegateFloat(_, x) | ast.Not(_, x) | ast.Try(_, x) ->
+      [x]
+    ast.Echo(_, x, m) -> list.append(opt_list(x), opt_list(m))
+    ast.Panic(_, m) | ast.Todo(_, m) -> opt_list(m)
+    ast.BitArray(_, segs) ->
+      list.flat_map(segs, fn(s) {
+        [
+          s.value |
+          list.filter_map(s.options, fn(o) { option.to_result(o.arg, Nil) })
+        ]
+      })
+  }
+}
+
+def arg_values(args: List(ast.Arg)) -> List(Expr) {
+  list.filter_map(args, fn(a) { option.to_result(a.value, Nil) })
+}
+
+def statement_exprs(stmt: Statement) -> List(Expr) {
+  case stmt {
+    ast.Assign(value: | _) -> [value]
+    ast.Expression(e) -> [e]
+    ast.Return(value: | _) -> [value]
+    ast.Use(call: | _) -> [call]
+    ast.Assert(value:, message: | _) -> [value | opt_list(message)]
+    ast.Guard(value:, otherwise: | _) ->
+      [value | list.flat_map(otherwise.body, statement_exprs)]
+  }
+}
+
+// --- 2. `?` hoisting -----------------------------------------------------------
+
+def try_call(s: Span, value: Expr) -> Expr {
+  ast.Call(s, ast.Var(s, result_try), [ast.Arg(value.span, None, Some(value))])
+}
+
+def try_name(s: Span) -> String {
+  "bea_try_" <> int.to_string(s.start)
+}
+
+/// Is the statement list being processed in tail position, i.e. is its value
+/// the value of the enclosing function? Only then can `?` use Gleam's
+/// `use x <- result.try(...)`, which short-circuits the *rest of the block*.
+/// Elsewhere `?` becomes an early `return Error(e)`, which the return
+/// lowering pass then propagates out of the enclosing branches.
+type Tail {
+  Tail
+  NotTail
+}
+
+/// `pattern = value?` (or `value?` alone when `pattern` is None).
+def bind_try(
+  tail: Tail,
+  s: Span,
+  pattern: Option((Pattern, Option(ast.Type))),
+  value: Expr,
+) -> List(Statement) {
+  case tail {
+    Tail -> case pattern {
+      Some((ast.PVar(| _) as p, annotation)) | Some((ast.PDiscard(| _) as p, annotation)) ->
+        [
+          ast.Use(
+            s,
+            [ast.UsePattern(p.span, p, annotation)],
+            try_call(s, value),
+          ),
+        ]
+      Some((p, annotation)) -> {
+        name = try_name(s)
+        [
+          ast.Use(
+            s,
+            [ast.UsePattern(s, ast.PVar(s, name), None)],
+            try_call(s, value),
+          ),
+          ast.Assign(s, p, annotation, ast.Var(s, name)),
+        ]
+      }
+      None ->
+        [
+          ast.Use(
+            s,
+            [ast.UsePattern(s, ast.PDiscard(s, "_"), None)],
+            try_call(s, value),
+          ),
+        ]
+    }
+    NotTail -> {
+      n = int.to_string(s.start)
+      ok = "bea_ok_" <> n
+      err = "bea_error_" <> n
+      unwrap = ast.Case(s, [value], [
+        ast.CaseClause(
+          s,
+          [
+            [
+              ast.PConstructor(
+                s,
+                None,
+                "Ok",
+                [ast.PatternArg(s, None, Some(ast.PVar(s, ok)))],
+                False,
+              ),
+            ],
+          ],
+          None,
+          ast.Var(s, ok),
+        ),
+        ast.CaseClause(
+          s,
+          [
+            [
+              ast.PConstructor(
+                s,
+                None,
+                "Error",
+                [ast.PatternArg(s, None, Some(ast.PVar(s, err)))],
+                False,
+              ),
+            ],
+          ],
+          None,
+          ast.Block(s, [
+            ast.Return(
+              s,
+              ast.Call(s, ast.Constructor(s, None, "Error"), [
+                ast.Arg(s, None, Some(ast.Var(s, err))),
+              ]),
+            ),
+          ]),
+        ),
+      ])
+      case pattern {
+        Some((p, annotation)) -> [ast.Assign(s, p, annotation, unwrap)]
+        None -> [ast.Assign(s, ast.PDiscard(s, "_"), None, unwrap)]
+      }
+    }
+  }
+}
+
+def hoist_block(stmts: List(Statement), tail: Tail) -> List(Statement) {
+  case stmts {
+    [] -> []
+    [last] -> hoist_stmt(last, True, tail)
+    [stmt | rest] ->
+      list.append(hoist_stmt(stmt, False, tail), hoist_block(rest, tail))
+  }
+}
+
+def hoist_stmt(stmt: Statement, is_last: Bool, tail: Tail) -> List(Statement) {
+  // Branches of the last expression of a tail block are themselves in tail
+  // position; so are those of a returned expression.
+  expr_tail = case is_last {
+    True -> tail
+    False -> NotTail
+  }
+  case stmt {
+    ast.Assign(s, pat, annotation, ast.Try(ts, inner)) -> {
+      (pre, inner) = hoist(inner, tail, NotTail)
+      _ = s
+      list.append(pre, bind_try(tail, ts, Some((pat, annotation)), inner))
+    }
+    ast.Assign(s, pat, annotation, value) -> {
+      (pre, value) = hoist(value, tail, NotTail)
+      list.append(pre, [ast.Assign(s, pat, annotation, value)])
+    }
+    ast.Expression(ast.Try(ts, inner)) -> {
+      (pre, inner) = hoist(inner, tail, NotTail)
+      case is_last {
+        False -> list.append(pre, bind_try(tail, ts, None, inner))
+        True -> {
+          name = try_name(ts)
+          list.flatten([
+            pre,
+            bind_try(tail, ts, Some((ast.PVar(ts, name), None)), inner),
+            [ast.Expression(ast.Var(ts, name))],
+          ])
+        }
+      }
+    }
+    ast.Expression(e) -> {
+      (pre, e) = hoist(e, tail, expr_tail)
+      list.append(pre, [ast.Expression(e)])
+    }
+    ast.Return(s, e) -> {
+      (pre, e) = hoist(e, tail, Tail)
+      list.append(pre, [ast.Return(s, e)])
+    }
+    ast.Use(s, ps, call) -> {
+      (pre, call) = hoist(call, tail, NotTail)
+      list.append(pre, [ast.Use(s, ps, call)])
+    }
+    ast.Assert(s, e, m) -> {
+      (pre, e) = hoist(e, tail, NotTail)
+      (pre2, m) = hoist_option(m, tail)
+      list.flatten([pre, pre2, [ast.Assert(s, e, m)]])
+    }
+    // Guards are desugared before hoisting.
+    ast.Guard(| _) -> [stmt]
+  }
+}
+
+/// Moves every `?` inside `e` that is evaluated unconditionally into
+/// statements placed before the current statement (in a block whose tailness
+/// is `block`). Branching constructs hoist inside their own branches;
+/// `expr_tail` says whether those branches are in tail position.
+///
+/// Evaluation order is preserved: when a sub-expression needs statements
+/// hoisted before it, any side-effecting sub-expressions to its left are
+/// first bound to temporaries, so they still run first.
+def hoist(e: Expr, block: Tail, expr_tail: Tail) -> (List(Statement), Expr) {
+  case e {
+    ast.Try(s, inner) -> {
+      (pre, inner) = hoist_child(inner, block)
+      name = try_name(s)
+      (
+        list.append(
+          pre,
+          bind_try(block, s, Some((ast.PVar(s, name), None)), inner),
+        ),
+        ast.Var(s, name),
+      )
+    }
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) | ast.Hole(| _) | ast.Fn(| _) | ast.Cond(| _) | ast.FnClauses(| _) ->
+      ([], e)
+    ast.String(s, parts) -> {
+      exprs = list.filter_map(parts, fn(p) {
+        case p {
+          ast.Interpolation(x, _) -> Ok(x)
+          _ -> Error(Nil)
+        }
+      })
+      (pre, exprs) = hoist_children(exprs, block)
+      (_, parts) = list.map_fold(parts, exprs, fn(remaining, p) {
+        case p, remaining {
+          ast.Interpolation(_, ps), [x | rest] ->
+            (rest, ast.Interpolation(x, ps))
+          _, _ -> (remaining, p)
+        }
+      })
+      (pre, ast.String(s, parts))
+    }
+    ast.FieldAccess(s, b, f, fs) -> {
+      (pre, b) = hoist_child(b, block)
+      (pre, ast.FieldAccess(s, b, f, fs))
+    }
+    ast.TupleIndex(s, b, i) -> {
+      (pre, b) = hoist_child(b, block)
+      (pre, ast.TupleIndex(s, b, i))
+    }
+    ast.Call(s, f, args) -> {
+      (pre, values) = hoist_children([f | arg_values(args)], block)
+      [f | values] = values
+      (pre, ast.Call(s, f, replace_args(args, values)))
+    }
+    ast.RecordUpdate(s, c, b, args) -> {
+      (pre, values) = hoist_children([b | arg_values(args)], block)
+      [b | values] = values
+      (pre, ast.RecordUpdate(s, c, b, replace_args(args, values)))
+    }
+    ast.Tuple(s, es) -> {
+      (pre, es) = hoist_children(es, block)
+      (pre, ast.Tuple(s, es))
+    }
+    ast.List(s, es, t) -> {
+      (pre, all) = hoist_children(list.append(es, opt_list(t)), block)
+      (es, t) = case t {
+        Some(_) -> {
+          [t | rev] = list.reverse(all)
+          (list.reverse(rev), Some(t))
+        }
+        None -> (all, None)
+      }
+      (pre, ast.List(s, es, t))
+    }
+    ast.Map(s, b, pairs) -> {
+      flat = list.append(
+        opt_list(b),
+        list.flat_map(pairs, fn(kv) { [kv.0, kv.1] }),
+      )
+      (pre, flat) = hoist_children(flat, block)
+      (b, flat) = case b, flat {
+        Some(_), [b | rest] -> (Some(b), rest)
+        _, _ -> (None, flat)
+      }
+      (pre, ast.Map(s, b, pair_up(flat)))
+    }
+    ast.Block(s, stmts) -> ([], ast.Block(s, hoist_block(stmts, expr_tail)))
+    ast.If(s, c, t, el) -> {
+      (pre, c) = hoist_child(c, block)
+      (
+        pre,
+        ast.If(
+          s,
+          c,
+          hoist_block(t, expr_tail),
+          option.map(el, hoist_block(_, expr_tail)),
+        ),
+      )
+    }
+    ast.Case(s, subjects, clauses) -> {
+      (pre, subjects) = hoist_children(subjects, block)
+      clauses = list.map(clauses, fn(c) {
+        body = case c.body {
+          ast.Block(bs, stmts) -> ast.Block(bs, hoist_block(stmts, expr_tail))
+          body -> case contains_try(body) {
+            False -> body
+            True ->
+              ast.Block(
+                body.span,
+                hoist_block([ast.Expression(body)], expr_tail),
+              )
+          }
+        }
+        ast.CaseClause(c | body:)
+      })
+      (pre, ast.Case(s, subjects, clauses))
+    }
+    ast.BinaryOp(s, op, l, r) -> {
+      (pre, values) = hoist_children([l, r], block)
+      [l, r] = values
+      (pre, ast.BinaryOp(s, op, l, r))
+    }
+    ast.Negate(s, x) -> {
+      (pre, x) = hoist_child(x, block)
+      (pre, ast.Negate(s, x))
+    }
+    ast.NegateFloat(s, x) -> {
+      (pre, x) = hoist_child(x, block)
+      (pre, ast.NegateFloat(s, x))
+    }
+    ast.Not(s, x) -> {
+      (pre, x) = hoist_child(x, block)
+      (pre, ast.Not(s, x))
+    }
+    ast.Echo(s, x, m) -> {
+      (pre, values) = hoist_children(opt_list(x), block)
+      x = list.first(values) |> option.from_result
+      (pre2, m) = hoist_option(m, block)
+      (list.append(pre, pre2), ast.Echo(s, x, m))
+    }
+    ast.Panic(s, m) -> {
+      (pre, m) = hoist_option(m, block)
+      (pre, ast.Panic(s, m))
+    }
+    ast.Todo(s, m) -> {
+      (pre, m) = hoist_option(m, block)
+      (pre, ast.Todo(s, m))
+    }
+    ast.BitArray(s, segs) -> {
+      (pre, values) = hoist_children(list.map(segs, fn(x) { x.value }), block)
+      segs = list.map2(segs, values, fn(seg, v) { ast.Segment(seg | value: v) })
+      (pre, ast.BitArray(s, segs))
+    }
+  }
+}
+
+/// Hoist a sub-expression. Branching expressions (`if`, `case`, blocks)
+/// that contain `?` or `return` are bound to a temporary first, so their
+/// early exits happen at statement level where they can be lowered.
+def hoist_child(x: Expr, block: Tail) -> (List(Statement), Expr) {
+  case x {
+    ast.If(| _) | ast.Case(| _) | ast.Block(| _) -> case contains_try(
+      x,
+    ) or expr_has_return(x) {
+      True -> {
+        (pre, x2) = hoist(x, block, NotTail)
+        name = "bea_val_" <> int.to_string(x.span.start)
+        (
+          list.append(pre, [
+            ast.Assign(x.span, ast.PVar(x.span, name), None, x2),
+          ]),
+          ast.Var(x.span, name),
+        )
+      }
+      False -> hoist(x, block, NotTail)
+    }
+    _ -> hoist(x, block, NotTail)
+  }
+}
+
+/// Hoist sibling sub-expressions evaluated left to right.
+def hoist_children(
+  es: List(Expr),
+  block: Tail,
+) -> (List(Statement), List(Expr)) {
+  parts = list.map(es, hoist_child(_, block))
+  // For each element: does any element to its right hoist statements?
+  (_, later) = list.fold_right(parts, (False, []), fn(acc, part) {
+    (seen, flags) = acc
+    (seen or part.0 != [], [seen | flags])
+  })
+  list.map2(parts, later, fn(part, later_has_pre) {
+    (pre, e) = part
+    case later_has_pre and not pure(e) {
+      True -> {
+        name = "bea_val_" <> int.to_string(e.span.start)
+        (
+          list.append(pre, [
+            ast.Assign(e.span, ast.PVar(e.span, name), None, e),
+          ]),
+          ast.Var(e.span, name),
+        )
+      }
+      False -> (pre, e)
+    }
+  })
+  |> unzip_flat
+}
+
+/// Expressions that can be moved without changing behaviour.
+def pure(e: Expr) -> Bool {
+  case e {
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) | ast.Hole(| _) | ast.Fn(| _) | ast.FnClauses(| _) ->
+      True
+    ast.String(_, parts) ->
+      list.all(parts, fn(p) {
+        case p {
+          ast.Text(| _) -> True
+          ast.Interpolation(x, _) -> pure(x)
+        }
+      })
+    ast.FieldAccess(base: | _) | ast.TupleIndex(base: | _) -> pure(base)
+    ast.Tuple(_, es) -> list.all(es, pure)
+    ast.List(_, es, t) -> list.all(list.append(es, opt_list(t)), pure)
+    ast.BinaryOp(_, op, l, r) -> op != ast.Pipe and pure(l) and pure(r)
+    ast.Negate(_, x) | ast.Not(_, x) -> pure(x)
+    _ -> False
+  }
+}
+
+def replace_args(args: List(ast.Arg), values: List(Expr)) -> List(ast.Arg) {
+  (_, args) = list.map_fold(args, values, fn(values, a) {
+    case a.value, values {
+      Some(_), [v | rest] -> (rest, ast.Arg(a | value: Some(v)))
+      _, _ -> (values, a)
+    }
+  })
+  args
+}
+
+def pair_up(xs: List(a)) -> List((a, a)) {
+  case xs {
+    [k, v | rest] -> [(k, v) | pair_up(rest)]
+    _ -> []
+  }
+}
+
+def hoist_option(
+  e: Option(Expr),
+  block: Tail,
+) -> (List(Statement), Option(Expr)) {
+  case e {
+    Some(e) -> {
+      (pre, e) = hoist_child(e, block)
+      (pre, Some(e))
+    }
+    None -> ([], None)
+  }
+}
+
+def unzip_flat(pairs: List((List(a), b))) -> (List(a), List(b)) {
+  (pres, xs) = list.unzip(pairs)
+  (list.flatten(pres), xs)
+}
+
+// --- 3. Early returns ----------------------------------------------------------
+
+def returns(stmts: List(Statement)) -> List(Statement) {
+  case stmts {
+    [] -> []
+    [ast.Return(_, e) | _] -> [ast.Expression(e)]
+    [stmt] -> case has_return(stmt) {
+      True -> branch(stmt, [])
+      False -> [stmt]
+    }
+    [stmt | rest] -> case has_return(stmt) {
+      False -> [stmt | returns(rest)]
+      True -> case stmt {
+        // Guard clause: `if cond { ...; return x }` followed by more code.
+        ast.Expression(ast.If(s, c, then, None)) -> case always_returns(then) {
+          True -> [guard(s, c, then) | returns(rest)]
+          False -> branch(stmt, rest)
+        }
+        _ -> branch(stmt, rest)
+      }
+    }
+  }
+}
+
+def guard(s: Span, condition: Expr, then: List(Statement)) -> Statement {
+  (helper, value) = case then {
+    [ast.Return(_, e)] -> case is_simple(e) {
+      True -> (bool_guard, e)
+      False -> (bool_lazy_guard, ast.Fn(s, [], None, returns(then)))
+    }
+    _ -> (bool_lazy_guard, ast.Fn(s, [], None, returns(then)))
+  }
+  ast.Use(
+    s,
+    [],
+    ast.Call(s, ast.Var(s, helper), [
+      ast.Arg(condition.span, Some("when"), Some(condition)),
+      ast.Arg(value.span, Some("return"), Some(value)),
+    ]),
+  )
+}
+
+/// Cheap, side effect free expressions can be evaluated eagerly by
+/// `bool.guard`; anything else goes through `bool.lazy_guard`.
+def is_simple(e: Expr) -> Bool {
+  case e {
+    ast.Int(| _) | ast.Float(| _) | ast.RawString(| _) | ast.Var(| _) | ast.Constructor(| _) ->
+      True
+    ast.String(_, parts) ->
+      list.all(parts, fn(p) {
+        case p {
+          ast.Text(| _) -> True
+          ast.Interpolation(x, _) -> is_simple(x)
+        }
+      })
+    ast.Tuple(_, es) -> list.all(es, is_simple)
+    ast.List(_, es, None) -> list.all(es, is_simple)
+    ast.Call(_, ast.Constructor(| _), args) ->
+      list.all(arg_values(args), is_simple)
+    ast.FieldAccess(_, ast.Var(| _), _, _) | ast.TupleIndex(_, ast.Var(| _), _) ->
+      True
+    // Operators can't fail or have side effects (division by zero is 0).
+    ast.BinaryOp(_, op, l, r) if op != ast.Pipe -> is_simple(l) and is_simple(r)
+    ast.Negate(_, x) | ast.NegateFloat(_, x) | ast.Not(_, x) -> is_simple(x)
+    _ -> False
+  }
+}
+
+type Branch {
+  /// Statements of the branch, and whether the branch introduces bindings
+  /// that would wrongly be visible to the code after it if inlined.
+  Branch(stmts: List(Statement), binds: Bool)
+}
+
+/// Lowers a statement containing `return`s that is followed by `rest`.
+def branch(stmt: Statement, rest: List(Statement)) -> List(Statement) {
+  (expr, binding) = case stmt {
+    ast.Expression(e) -> (e, None)
+    ast.Assign(s, p, t, v) -> (v, Some((s, p, t)))
+    // Anything else (`use`, `assert`) is reported by `leftover_returns`.
+    _ -> (ast.Hole(span.empty), None)
+  }
+  case branches_of(expr, option.is_some(binding)) {
+    Error(_) -> [stmt | returns(rest)]
+    Ok(branches) -> {
+      falling = list.filter(branches, fn(b) { not always_returns(b.stmts) })
+      needs_closure = case rest, falling {
+        [], _ -> False
+        _, [] -> False
+        _, [single] -> single.binds
+        _, _ -> True
+      }
+      k = "bea_continue_" <> int.to_string(ast.statement_span(stmt).start)
+      ks = ast.statement_span(stmt)
+      continue = fn(b: Branch) -> List(Statement) {
+        case always_returns(b.stmts) {
+          True -> returns(b.stmts)
+          False -> case needs_closure, binding {
+            False, None -> returns(list.append(b.stmts, rest))
+            False, Some((s, p, t)) ->
+              returns(
+                list.append(
+                  bind_last(b.stmts, fn(e) { [ast.Assign(s, p, t, e)] }),
+                  rest,
+                ),
+              )
+            True, None ->
+              returns(
+                list.append(b.stmts, [
+                  ast.Expression(ast.Call(ks, ast.Var(ks, k), [])),
+                ]),
+              )
+            True, Some(_) ->
+              returns(
+                bind_last(b.stmts, fn(e) {
+                  case expr_has_return(e) {
+                    // `k(if c { return 1 } else { 2 })` can't be lowered;
+                    // bind the value first and let `returns` handle it.
+                    True -> {
+                      v = "bea_value_" <> int.to_string(e.span.start)
+                      [
+                        ast.Assign(e.span, ast.PVar(e.span, v), None, e),
+                        ast.Expression(
+                          ast.Call(ks, ast.Var(ks, k), [
+                            ast.Arg(e.span, None, Some(ast.Var(e.span, v))),
+                          ]),
+                        ),
+                      ]
+                    }
+                    False ->
+                      [
+                        ast.Expression(
+                          ast.Call(ks, ast.Var(ks, k), [
+                            ast.Arg(e.span, None, Some(e)),
+                          ]),
+                        ),
+                      ]
+                  }
+                }),
+              )
+          }
+        }
+      }
+      rebuilt = rebuild(expr, list.map(branches, continue))
+      case needs_closure {
+        False -> [ast.Expression(rebuilt)]
+        True -> {
+          closure = case binding {
+            None -> ast.Fn(ks, [], None, returns(rest))
+            Some((s, p, t)) -> {
+              v = "bea_value_" <> int.to_string(ks.start)
+              ast.Fn(
+                ks,
+                [ast.FnParam(ks, ast.PVar(ks, v), t)],
+                None,
+                returns([ast.Assign(s, p, None, ast.Var(ks, v)) | rest]),
+              )
+            }
+          }
+          [
+            ast.Assign(ks, ast.PVar(ks, k), None, closure),
+            ast.Expression(rebuilt),
+          ]
+        }
+      }
+    }
+  }
+}
+
+/// Replace the final expression of a branch, used when an assignment's value
+/// is a branching expression: `x = if c { return 1 } else { 2 }`.
+def bind_last(
+  stmts: List(Statement),
+  f: fn(Expr) -> List(Statement),
+) -> List(Statement) {
+  case list.reverse(stmts) {
+    [ast.Expression(e) | before] -> list.append(list.reverse(before), f(e))
+    [] -> f(ast.Constructor(span.empty, None, "Nil"))
+    _ -> list.append(stmts, f(ast.Constructor(span.empty, None, "Nil")))
+  }
+}
+
+def branches_of(e: Expr, has_binding: Bool) -> Result(List(Branch), Nil) {
+  case e {
+    ast.If(_, _, then, el) -> {
+      // A missing `else` evaluates to Nil; only spell that out when the value
+      // is actually used.
+      missing = case has_binding {
+        True -> [ast.Expression(ast.Constructor(e.span, None, "Nil"))]
+        False -> []
+      }
+      Ok([
+        Branch(then, binds_any(then)),
+        Branch(option.unwrap(el, missing), binds_any(option.unwrap(el, []))),
+      ])
+    }
+    ast.Case(_, _, clauses) ->
+      Ok(
+        list.map(clauses, fn(c) {
+          stmts = clause_stmts(c)
+          pattern_binds = list.any(c.alternatives, fn(alt) {
+            list.any(alt, pattern_binds)
+          })
+          Branch(stmts, pattern_binds or binds_any(stmts))
+        }),
+      )
+    ast.Block(_, stmts) -> Ok([Branch(stmts, binds_any(stmts))])
+    _ -> Error(Nil)
+  }
+}
+
+def clause_stmts(c: CaseClause) -> List(Statement) {
+  case c.body {
+    ast.Block(_, stmts) -> stmts
+    body -> [ast.Expression(body)]
+  }
+}
+
+def rebuild(e: Expr, branches: List(List(Statement))) -> Expr {
+  case e, branches {
+    ast.If(s, c, _, _), [t, el] -> ast.If(s, c, t, Some(el))
+    ast.Case(s, subjects, clauses), _ ->
+      ast.Case(
+        s,
+        subjects,
+        list.map2(clauses, branches, fn(c, stmts) {
+          ast.CaseClause(c | body: ast.Block(c.body.span, stmts))
+        }),
+      )
+    ast.Block(s, _), [stmts] -> ast.Block(s, stmts)
+    _, _ -> e
+  }
+}
+
+def binds_any(stmts: List(Statement)) -> Bool {
+  list.any(stmts, fn(s) {
+    case s {
+      ast.Assign(pattern: | _) -> pattern_binds(pattern)
+      ast.Use(patterns: | _) ->
+        list.any(patterns, fn(p) { pattern_binds(p.pattern) })
+      _ -> False
+    }
+  })
+}
+
+pub def pattern_binds(p: Pattern) -> Bool {
+  case p {
+    // Compiler generated names can't be referenced by user code.
+    ast.PVar(_, name) if name != "" -> case synthetic(name) {
+      True -> False
+      False -> True
+    }
+    ast.PVar(| _) | ast.PAssign(| _) -> True
+    ast.PInt(| _) | ast.PFloat(| _) | ast.PString(| _) | ast.PDiscard(| _) ->
+      False
+    ast.PTuple(_, ps) -> list.any(ps, pattern_binds)
+    ast.PList(_, ps, t) -> list.any(list.append(ps, opt_list(t)), pattern_binds)
+    ast.PConstructor(args: | _) ->
+      list.any(args, fn(a) {
+        case a.value {
+          None -> True
+          Some(p) -> pattern_binds(p)
+        }
+      })
+    ast.PConcat(_, _, name, rest) -> option.is_some(name) or pattern_binds(rest)
+    ast.PBitArray(_, segs) -> list.any(segs, fn(s) { pattern_binds(s.value) })
+  }
+}
+
+def always_returns(stmts: List(Statement)) -> Bool {
+  list.any(stmts, stmt_always_returns)
+}
+
+def stmt_always_returns(stmt: Statement) -> Bool {
+  case stmt {
+    ast.Return(| _) -> True
+    ast.Expression(e) | ast.Assign(value: e | _) -> expr_always_returns(e)
+    _ -> False
+  }
+}
+
+def expr_always_returns(e: Expr) -> Bool {
+  case e {
+    // `panic` and `todo` never fall through either.
+    ast.Panic(| _) | ast.Todo(| _) -> True
+    ast.If(_, _, t, Some(el)) -> always_returns(t) and always_returns(el)
+    ast.Case(_, _, clauses) ->
+      clauses != [] and list.all(clauses, fn(c) {
+        always_returns(clause_stmts(c))
+      })
+    ast.Block(_, stmts) -> always_returns(stmts)
+    _ -> False
+  }
+}
+
+def has_return(stmt: Statement) -> Bool {
+  case stmt {
+    ast.Return(| _) -> True
+    ast.Guard(otherwise: | _) ->
+      list.any(otherwise.body, has_return) or list.any(
+        statement_exprs(stmt),
+        expr_has_return,
+      )
+    _ -> list.any(statement_exprs(stmt), expr_has_return)
+  }
+}
+
+def expr_has_return(e: Expr) -> Bool {
+  case e {
+    ast.Fn(| _) -> False
+    ast.Block(_, stmts) -> list.any(stmts, has_return)
+    ast.If(_, c, t, el) ->
+      expr_has_return(c) or list.any(t, has_return) or list.any(
+        option.unwrap(el, []),
+        has_return,
+      )
+    ast.Case(_, subjects, clauses) ->
+      list.any(subjects, expr_has_return) or list.any(clauses, fn(c) {
+        expr_has_return(c.body)
+      })
+    _ -> list.any(children(e), expr_has_return)
+  }
+}
+
+// --- Validation ------------------------------------------------------------------
+
+/// Any `return` still present after lowering sits somewhere it can't work,
+/// e.g. inside a function argument.
+def leftover_returns(it: Item) -> List(Diagnostic) {
+  case it {
+    ast.Function(clauses: clauses | _) ->
+      list.flat_map(clauses, fn(c) {
+        list.flat_map(option.unwrap(c.body, []), stmt_returns)
+      })
+    _ -> []
+  }
+}
+
+def stmt_returns(stmt: Statement) -> List(Diagnostic) {
+  case stmt {
+    ast.Return(s, _) ->
+      [
+        diagnostic.error("Unsupported return", s, "`return` can't be used here")
+        |> diagnostic.with_hint(
+          "A return must be a statement of a function body, or of an `if`, `case` or block at statement level.",
+        ),
+      ]
+    _ -> list.flat_map(statement_exprs(stmt), expr_returns)
+  }
+}
+
+def expr_returns(e: Expr) -> List(Diagnostic) {
+  case e {
+    ast.Fn(_, _, _, body) -> list.flat_map(body, stmt_returns)
+    ast.FnClauses(| _) -> []
+    ast.Block(_, stmts) -> list.flat_map(stmts, stmt_returns)
+    ast.If(_, c, t, el) ->
+      list.flatten([
+        expr_returns(c),
+        list.flat_map(t, stmt_returns),
+        list.flat_map(option.unwrap(el, []), stmt_returns),
+      ])
+    _ -> list.flat_map(children(e), expr_returns)
+  }
+}
+
+def int_range(n: Int) -> List(Int) {
+  do_range(n - 1, [])
+}
+
+def do_range(i: Int, acc: List(Int)) -> List(Int) {
+  case i < 0 {
+    True -> acc
+    False -> do_range(i - 1, [i | acc])
+  }
+}
+
+def opt_list(o: Option(a)) -> List(a) {
+  case o {
+    Some(x) -> [x]
+    None -> []
+  }
+}
+
+/// `?` that survived hoisting is somewhere it can't be supported: a case
+/// guard, a function guard or a constant.
+def leftover_tries(it: Item) -> List(Diagnostic) {
+  case it {
+    ast.Function(clauses: clauses | _) ->
+      list.flat_map(clauses, fn(c) {
+        list.append(
+          list.flat_map(opt_list(c.guard), expr_tries),
+          list.flat_map(option.unwrap(c.body, []), fn(s) {
+            list.flat_map(statement_exprs(s), expr_tries)
+          }),
+        )
+      })
+    ast.Const(value: | _) -> expr_tries(value)
+    _ -> []
+  }
+}
+
+def expr_tries(e: Expr) -> List(Diagnostic) {
+  case e {
+    ast.Try(s, _) ->
+      [
+        diagnostic.error("Unsupported `?`", s, "`?` can't be used here")
+        |> diagnostic.with_hint(
+          "`?` works inside function bodies, but not in guards or constants.",
+        ),
+      ]
+    ast.Fn(_, _, _, body) ->
+      list.flat_map(body, fn(s) {
+        list.flat_map(statement_exprs(s), expr_tries)
+      })
+    ast.FnClauses(| _) -> []
+    _ -> list.flat_map(children(e), expr_tries)
+  }
+}
+
+/// Names generated by lowering: `bea_try_12`, `bea_value_40`, ...
+def synthetic(name: String) -> Bool {
+  prefixes = [
+    "bea_try_",
+    "bea_ok_",
+    "bea_error_",
+    "bea_value_",
+    "bea_val_",
+    "bea_param_",
+    "bea_continue_",
+  ]
+  list.any(prefixes, fn(prefix) {
+    case string.starts_with(name, prefix) {
+      True -> {
+        rest = string.drop_start(name, string.length(prefix))
+        rest != "" and list.all(string.to_graphemes(rest), fn(c) {
+          string.contains("0123456789", c)
+        })
+      }
+      False -> False
+    }
+  })
+}
+
+/// A type written out without positions, for comparisons and messages.
+def type_key(t: ast.Type) -> String {
+  case t {
+    ast.NamedType(_, m, name, args) -> {
+      n = case m {
+        Some(m) -> m <> "." <> name
+        None -> name
+      }
+      case args {
+        [] -> n
+        _ -> n <> "(" <> string.join(list.map(args, type_key), ", ") <> ")"
+      }
+    }
+    ast.VarType(_, n) | ast.HoleType(_, n) -> n
+    ast.TupleType(_, ts) ->
+      "(" <> string.join(list.map(ts, type_key), ", ") <> ")"
+    ast.FnType(_, ps, r) ->
+      "fn(" <> string.join(list.map(ps, type_key), ", ") <> ") -> " <> type_key(
+        r,
+      )
+  }
+}

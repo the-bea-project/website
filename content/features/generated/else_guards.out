@@ -1,0 +1,12 @@
+-> sign up
+src/else_guards.bea:60
+"welcome, Ada"
+src/else_guards.bea:61
+"two is not a number"
+src/else_guards.bea:62
+"come back in 3 years"
+src/else_guards.bea:63
+"name is missing"
+src/else_guards.bea:64
+"Ada"
+<- sign up

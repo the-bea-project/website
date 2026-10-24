@@ -1,0 +1,92 @@
+//// A deriver of JSON decoders, written as ordinary Bea code:
+////
+//// ```bea
+//// import bea_json/decoder
+////
+//// @derive(decoder)
+//// pub type Credentials {
+////   Credentials(username: String, password: String)
+//// }
+////
+//// credentials = decoder.from_json(body, Credentials.decoder())?
+//// ```
+////
+//// A derived decoder is a plain `decode.Decoder` from the standard
+//// library, so it works with `json.parse`, `decode.run` on any `Dynamic`,
+//// and every Gleam library that takes decoders.
+////
+//// The conventions are this module's, not the compiler's: a record is an
+//// object with a key per field label; a field whose decoder accepts `null`
+//// (an `Option`) may also be left out; an integer is accepted where a float
+//// is expected; errors are the standard library's, with the path to the
+//// failing value.
+
+import gleam/dynamic
+import gleam/dynamic/decode.{type Decoder}
+import gleam/json
+
+// --- What `@derive(decoder)` calls --------------------------------------------------
+
+/// A record is decoded from its fields.
+pub def record(_constructor: String, fields: fn() -> Decoder(r)) -> Decoder(r) {
+  fields()
+}
+
+/// One field, under its label. Missing is the same as `null`: fine when the
+/// field's decoder accepts `null`, a "missing field" error otherwise.
+pub def field(
+  label: String,
+  of: Decoder(a),
+  _get: fn(r) -> a,
+  next: fn(a) -> Decoder(r),
+) -> Decoder(r) {
+  case decode.run(dynamic.nil(), of) {
+    Ok(when_missing) -> decode.optional_field(label, when_missing, of, next)
+    Error(_) -> decode.field(label, of, next)
+  }
+}
+
+pub def done(value: r) -> Decoder(r) {
+  decode.success(value)
+}
+
+// --- Decoders for the types fields can have -------------------------------------------
+
+pub def string() -> Decoder(String) {
+  decode.string
+}
+
+pub def int() -> Decoder(Int) {
+  decode.int
+}
+
+pub def bool() -> Decoder(Bool) {
+  decode.bool
+}
+
+/// JSON doesn't tell `1` from `1.0`: both are fine for a `Float`.
+pub def float() -> Decoder(Float) {
+  decode.one_of(decode.float, [decode.int |> decode.map(int.to_float)])
+}
+
+pub def list(of: Decoder(a)) -> Decoder(List(a)) {
+  decode.list(of)
+}
+
+/// `null` is `None`.
+pub def option(of: Decoder(a)) -> Decoder(Option(a)) {
+  decode.optional(of)
+}
+
+pub def dict(keys: Decoder(k), values: Decoder(v)) -> Decoder(Dict(k, v)) {
+  decode.dict(keys, values)
+}
+
+// --- Running ------------------------------------------------------------------------
+
+pub def from_json(
+  text: String,
+  decoder: Decoder(a),
+) -> Result(a, json.DecodeError) {
+  json.parse(text, decoder)
+}

@@ -1,0 +1,226 @@
+//// What every page gets in the browser: the theme switch, code tabs, copy
+//// buttons, and the tour's lesson list folded away on small screens. The
+//// pages read fine without any of it.
+
+import gleam/javascript/array
+import gleam/javascript/promise
+import plinth/browser/clipboard
+import plinth/browser/document
+import plinth/browser/dom_token_list
+import plinth/browser/element.{type Element}
+import plinth/browser/event.{type Event, type KeyboardEvent, type UIEvent}
+import plinth/browser/web_storage
+import plinth/browser/window
+import plinth/javascript/global
+
+@external(javascript, "./ffi.mjs", "prefers_dark")
+def prefers_dark() -> Bool
+
+pub def main() -> Nil {
+  theme_toggle()
+  list.each(all(".code [role=tablist]"), tabs)
+  document.add_event_listener("click", copy)
+  fold_lesson_list()
+}
+
+def all(selector: String) -> List(Element) {
+  document.query_selector_all(selector) |> array.to_list
+}
+
+// --- Theme: the system's, or the one you picked ------------------------------------------
+
+def root() -> Element {
+  Ok(root) = document.query_selector("html") else panic
+  root
+}
+
+def current_theme() -> String {
+  case element.get_attribute(root(), "data-theme") {
+    Ok(theme) -> theme
+    Error(_) -> if prefers_dark() {
+      "dark"
+    } else {
+      "light"
+    }
+  }
+}
+
+def other(theme: String) -> String {
+  if theme == "dark" {
+    "light"
+  } else {
+    "dark"
+  }
+}
+
+def theme_toggle() -> Nil {
+  Ok(toggle) = document.query_selector(".theme-toggle") else Nil
+  label_toggle(toggle)
+  _ = element.add_event_listener(toggle, "click", fn(_) {
+    next = other(current_theme())
+    storage = web_storage.local()
+    // Going back to what the system prefers forgets the choice.
+    if {
+      next == "dark"
+    } == prefers_dark() {
+      element.remove_attribute(root(), "data-theme")
+      _ = result.map(storage, web_storage.remove_item(_, "bea-theme"))
+      Nil
+    } else {
+      element.set_attribute(root(), "data-theme", next)
+      _ = result.map(storage, web_storage.set_item(_, "bea-theme", next))
+      Nil
+    }
+    label_toggle(toggle)
+  })
+  Nil
+}
+
+def label_toggle(toggle: Element) -> Nil {
+  label = "Switch to #{other(current_theme())} theme"
+  element.set_attribute(toggle, "aria-label", label)
+  element.set_attribute(toggle, "title", label)
+}
+
+// --- Tabs: click, or the arrow keys, Home and End ------------------------------------------
+
+def tabs(tablist: Element) -> Nil {
+  ids =
+    element.query_selector_all(tablist, "[role=tab]")
+    |> array.to_list
+    |> list.filter_map(element.get_attribute(_, "id"))
+  _ = element.add_event_listener(tablist, "click", fn(e) {
+    case clicked_tab(e) {
+      Ok(id) -> select(ids, id, False)
+      Error(_) -> Nil
+    }
+  })
+  _ = element.add_event_listener(tablist, "keydown", fn(
+    e: Event(UIEvent(KeyboardEvent)),
+  ) {
+    Ok(current) = clicked_tab(e) else Nil
+    Ok(i) = index_of(ids, current, 0) else Nil
+    count = list.length(ids)
+    move = case event.key(e) {
+      "ArrowRight" -> Ok(i + 1)
+      "ArrowLeft" -> Ok(i - 1)
+      "Home" -> Ok(0)
+      "End" -> Ok(count - 1)
+      _ -> Error(Nil)
+    }
+    Ok(to) = move else Nil
+    event.prevent_default(e)
+    Ok(id) =
+      list.drop(
+        ids,
+        {
+          to + count
+        } % count,
+      )
+      |> list.first else Nil
+    select(ids, id, True)
+  })
+  Nil
+}
+
+/// The id of the tab an event happened on.
+def clicked_tab(e: Event(t)) -> Result(String, Nil) {
+  Ok(target) = element.cast(event.target(e)) else Error(Nil)
+  tab = element.closest(target, "[role=tab]")?
+  element.get_attribute(tab, "id")
+}
+
+def index_of(ids: List(String), id: String, i: Int) -> Result(Int, Nil) {
+  case ids {
+    [] -> Error(Nil)
+    [first | _] if first == id -> Ok(i)
+    [_ | rest] -> index_of(rest, id, i + 1)
+  }
+}
+
+def select(ids: List(String), selected: String, focus: Bool) -> Nil {
+  list.each(ids, fn(id) {
+    Ok(tab) = document.get_element_by_id(id) else Nil
+    on = id == selected
+    element.set_attribute(
+      tab,
+      "aria-selected",
+      bool.to_string(on) |> string.lowercase,
+    )
+    element.set_attribute(
+      tab,
+      "tabindex",
+      if on {
+        "0"
+      } else {
+        "-1"
+      },
+    )
+    Ok(panel_id) = element.get_attribute(tab, "aria-controls") else Nil
+    Ok(panel) = document.get_element_by_id(panel_id) else Nil
+    if on {
+      element.remove_attribute(panel, "hidden")
+    } else {
+      element.set_attribute(panel, "hidden", "")
+    }
+    if on and focus {
+      element.focus(tab)
+    }
+  })
+}
+
+// --- Copy buttons ---------------------------------------------------------------------------
+
+def copy(e: Event(t)) -> Nil {
+  Ok(target) = element.cast(event.target(e)) else Nil
+  Ok(button) = element.closest(target, ".copy") else Nil
+  Ok(box) = element.closest(button, ".code, .pg-pane") else Nil
+  text = case element.query_selector(
+    box,
+    ".code-panel:not([hidden]) pre, pre.pg-output, pre",
+  ) {
+    Ok(pre) -> element.inner_text(pre) |> trim_newline
+    Error(_) -> ""
+  }
+  label = element.query_selector(button, "span")
+  say = fn(text) {
+    _ = result.map(label, element.set_text_content(_, text))
+    Nil
+  }
+  _ =
+    clipboard.write_text(text)
+    |> promise.map(fn(copied) {
+      case copied {
+        Ok(_) -> {
+          element.class_list(button)
+          |> dom_token_list.add(array.from_list(["done"]))
+          say("Copied")
+        }
+        Error(_) -> say("Select and copy")
+      }
+      global.set_timeout(1600, fn() {
+        element.class_list(button)
+        |> dom_token_list.remove(array.from_list(["done"]))
+        say("Copy")
+      })
+    })
+  Nil
+}
+
+def trim_newline(text: String) -> String {
+  if string.ends_with(text, "\n") {
+    string.drop_end(text, 1)
+  } else {
+    text
+  }
+}
+
+// --- The tour's lesson list ---------------------------------------------------------------------
+
+/// On small screens the lesson list starts folded, so the lesson comes first.
+def fold_lesson_list() -> Nil {
+  Ok(details) = document.query_selector(".tour-page .tour-nav-details") else Nil
+  if window.inner_width(window.self()) <= 900 {
+    element.remove_attribute(details, "open")
+  }
+}

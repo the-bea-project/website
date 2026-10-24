@@ -1,4 +1,5 @@
 dist/
-node_modules/
+.beabuild/
+build/
+erl_crash.dump
 .DS_Store
-playground-engine/build/

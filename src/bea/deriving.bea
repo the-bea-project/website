@@ -1,0 +1,1308 @@
+//// `@derive`: functions written from the structure of a record type by an
+//// ordinary module, the *deriver*.
+////
+//// ```bea
+//// import my_json/decoder
+////
+//// @derive(decoder)
+//// pub type Credentials {
+////   Credentials(username: String, password: String)
+//// }
+//// ```
+////
+//// defines `credentials_decoder()` (which Bea code calls through the type,
+//// `Credentials.decoder()`: see `bea/associated`), exactly as if it had been
+//// written by hand:
+////
+//// ```bea
+//// /// Derived by `@derive(decoder)` on `Credentials`.
+//// pub def credentials_decoder() {
+////   use <- decoder.record("Credentials")
+////   use username <- decoder.field("username", decoder.string(), fn(value: Credentials) { value.username })
+////   use password <- decoder.field("password", decoder.string(), fn(value: Credentials) { value.password })
+////   decoder.done(Credentials(username:, password:))
+//// }
+//// ```
+////
+//// The compiler knows nothing about any deriver. It spells the record out —
+//// its constructor, and each field's label, type and accessor — as calls to
+//// three functions that every deriver exports:
+////
+//// - `record(constructor_name, fields: fn() -> fields)` makes the result
+////   from the fields (called when and as often as the deriver likes),
+//// - `field(label, capability, get, next)` is one field: `capability` is
+////   the deriver's value for the field's type, `get` reads the field from a
+////   record, and `next` continues with the field's value,
+//// - `done(value)` ends the fields with the record they make up.
+////
+//// Read with `use`, that is the shape of a decoder; ignoring `next`'s
+//// argument and using `get`, it is the shape of an encoder. Which one a
+//// deriver implements, and all of its conventions (names, missing fields,
+//// nulls, numbers, errors), are its own business.
+////
+//// A field's capability comes from its type, statically:
+////
+//// - a type parameter `a`: an argument of the derived function, so
+////   `@derive(decoder)` on `Page(a)` defines `page_decoder(a_decoder)`;
+//// - a type of this module, or of another Bea module of the project: that
+////   module's `<type>_<deriver>` (`user_decoder()`, `users.user_decoder()`),
+////   derived, or written by hand for a type that can't be (a union, a
+////   recursive or an external type);
+//// - a type alias: what it stands for (another module's alias when it only
+////   names the prelude and the standard library, like `pub type Id =
+////   String`);
+//// - any other type (the prelude's, the standard library's, other
+////   packages'): the deriver's own, named after the type: `decoder.string()`,
+////   `decoder.list(a)`, `decoder.option(a)`, `decoder.timestamp()`. A type
+////   the deriver doesn't have is a compile error on the field.
+////
+//// Only records are derived for now: a single constructor with labelled
+//// fields, not recursive. Anything else is a compile error.
+
+import bea/ast.{type Expr, type Item, type Type}
+import bea/codegen
+import bea/diagnostic.{type Diagnostic}
+import bea/span.{type Span}
+import gleam/dict.{type Dict}
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/result
+import gleam/set.{type Set}
+import gleam/string
+
+const attribute = "derive"
+
+/// Expands the `@derive` attributes of a module: the functions are added
+/// after their type, and the attributes removed.
+pub def module(
+  module: ast.Module,
+  ctx: codegen.Context,
+) -> (ast.Module, List(Diagnostic)) {
+  case list.any(module.items, has_derive) {
+    False -> (module, [])
+    True -> {
+      scope = scope(module)
+      requests = list.flat_map(module.items, requests(_, scope))
+      names_errors = clashes(requests, scope)
+      (items, errors) = list.fold(module.items, ([], names_errors), fn(
+        acc,
+        it,
+      ) {
+        (items, errors) = acc
+        case it {
+          ast.CustomType(attributes: | _) -> {
+            mine = list.filter(requests, fn(r) { r.type_.name == it.name })
+            (functions, errs) = list.fold(mine, ([], errors), fn(acc, r) {
+              case r.deriver {
+                Ok(deriver) -> case derive_record(
+                  r.type_,
+                  deriver,
+                  scope,
+                  ctx,
+                ) {
+                  Ok(f) -> ([f | acc.0], acc.1)
+                  Error(e) -> (acc.0, list.append(acc.1, e))
+                }
+                Error(e) -> (acc.0, [e | acc.1])
+              }
+            })
+            cleaned = ast.CustomType(
+              it |
+              attributes: list.filter(attributes, fn(a) {
+                a.name != attribute
+              }),
+            )
+            (list.append(functions, [cleaned | items]), errs)
+          }
+          _ -> ([it | items], list.append(errors, misplaced(it)))
+        }
+      })
+      errors = list.sort(errors, fn(a, b) {
+        int.compare(a.span.start, b.span.start)
+      })
+      (ast.Module(module | items: list.reverse(items)), errors)
+    }
+  }
+}
+
+/// The functions a module derives that other modules may call, for
+/// `codegen.Context`: those of its public types.
+pub def exports(module: ast.Module) -> List(codegen.Derived) {
+  scope = scope(module)
+  list.flat_map(module.items, requests(_, scope))
+  |> list.filter_map(fn(r) {
+    case r.deriver, r.type_ {
+      Ok(d), RecordType(exported: True | _) ->
+        Ok(
+          codegen.Derived(
+            r.type_.name,
+            d.path,
+            function_name(r.type_.name, d.name),
+            capabilities(r.type_, table(scope, d.name)),
+            r.type_.public,
+          ),
+        )
+      _, _ -> Error(Nil)
+    }
+  })
+}
+
+/// The module's public type aliases that mean the same in any module,
+/// for `codegen.Context`: `pub type Id = String`, `pub type Pairs(v) =
+/// Dict(String, v)`, but not `pub type Users = List(User)`.
+pub def portable_aliases(
+  module: ast.Module,
+) -> Dict(String, (List(String), Type)) {
+  scope = scope(module)
+  list.fold(module.items, dict.new(), fn(acc, it) {
+    case it {
+      ast.TypeAlias(publicity: ast.Public, name:, params:, aliased: | _) -> case portable(
+        scope,
+        aliased,
+      ) {
+        True -> dict.insert(acc, name, (params, aliased))
+        False -> acc
+      }
+      _ -> acc
+    }
+  })
+}
+
+def portable(scope: Scope, t: Type) -> Bool {
+  case t {
+    ast.VarType(| _) -> True
+    ast.NamedType(_, None, name, args) ->
+      not dict.has_key(scope.types, name) and not dict.has_key(
+        scope.imported_types,
+        name,
+      ) and list.all(args, portable(scope, _))
+    _ -> False
+  }
+}
+
+/// `Credentials` + `decoder` -> `credentials_decoder`.
+pub def function_name(type_name: String, deriver: String) -> String {
+  snake_case(type_name) <> "_" <> deriver
+}
+
+/// `BitArray` -> `bit_array`, `HTTPRequest` -> `http_request`.
+pub def snake_case(name: String) -> String {
+  chars = string.to_graphemes(name)
+  next = list.append(list.drop(chars, 1), [""])
+  prev = ["" | chars]
+  list.zip(list.zip(prev, chars), next)
+  |> list.map(fn(t) {
+    ((p, c), n) = t
+    boundary =
+      is_upper(c) and p != "" and {
+        is_lower_or_digit(p) or {
+          is_upper(p) and is_lower_or_digit(n)
+        }
+      }
+    case boundary {
+      True -> "_" <> string.lowercase(c)
+      False -> string.lowercase(c)
+    }
+  })
+  |> string.concat
+}
+
+def is_upper(c: String) -> Bool {
+  c != "" and string.uppercase(c) == c and string.lowercase(c) != c
+}
+
+def is_lower_or_digit(c: String) -> Bool {
+  c != "" and {
+    string.lowercase(c) == c
+  }
+}
+
+// --- What the module defines and imports -------------------------------------------
+
+type Scope {
+  Scope(
+    /// Module qualifier -> module path: imports, and the standard library
+    /// modules Bea imports by itself.
+    modules: Dict(String, String),
+    /// Unqualified imported types: local name -> (module path, qualifier,
+    /// name in that module).
+    imported_types: Dict(String, (String, String, String)),
+    /// The module's own types.
+    types: Dict(String, Item),
+    /// The module's type aliases that aren't defined in terms of themselves:
+    /// name -> (parameters, aliased type).
+    aliases: Dict(String, (List(String), Type)),
+    /// Lower case names the module defines or imports unqualified.
+    values: Set(String),
+    /// (type, deriver qualifier) pairs derived in this module.
+    derived: Set((String, String)),
+  )
+}
+
+def scope(module: ast.Module) -> Scope {
+  imports = list.filter_map(module.items, fn(it) {
+    case it {
+      ast.Import(module: path, alias:, unqualified: | _) -> {
+        name = case alias {
+          Some((a, _)) -> a
+          None -> last_segment(path)
+        }
+        Ok((path, name, unqualified))
+      }
+      _ -> Error(Nil)
+    }
+  })
+  modules = list.fold(imports, dict.from_list(codegen.std_modules), fn(acc, i) {
+    dict.insert(acc, i.1, i.0)
+  })
+  imported_types = list.fold(imports, dict.new(), fn(acc, i) {
+    list.fold(i.2, acc, fn(acc, u) {
+      case u.is_type {
+        True ->
+          dict.insert(acc, option.unwrap(u.alias, u.name), (i.0, i.1, u.name))
+        False -> acc
+      }
+    })
+  })
+  types = list.fold(module.items, dict.new(), fn(acc, it) {
+    case it {
+      ast.CustomType(name: | _) | ast.TypeAlias(name: | _) | ast.ExternalType(name: | _) ->
+        dict.insert(acc, name, it)
+      _ -> acc
+    }
+  })
+  values = list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.Function(name: | _) | ast.Const(name: | _) -> set.insert(acc, name)
+      ast.Import(unqualified: | _) ->
+        list.fold(unqualified, acc, fn(acc, u) {
+          case u.is_type {
+            True -> acc
+            False -> set.insert(acc, option.unwrap(u.alias, u.name))
+          }
+        })
+      _ -> acc
+    }
+  })
+  derived = list.fold(module.items, set.new(), fn(acc, it) {
+    case it {
+      ast.CustomType(name:, attributes: | _) ->
+        list.fold(codegen.derivers(attributes), acc, fn(acc, d) {
+          set.insert(acc, (name, d))
+        })
+      _ -> acc
+    }
+  })
+  aliases = dict.fold(types, dict.new(), fn(acc, name, it) {
+    case it {
+      ast.TypeAlias(params:, aliased: | _) -> case refers_to(
+        types,
+        [aliased],
+        name,
+        set.new(),
+      ) {
+        True -> acc
+        False -> dict.insert(acc, name, (params, aliased))
+      }
+      _ -> acc
+    }
+  })
+  Scope(modules, imported_types, types, aliases, values, derived)
+}
+
+/// Whether the alias `name` is used by `types`, through other aliases.
+def refers_to(
+  items: Dict(String, Item),
+  types: List(Type),
+  name: String,
+  seen: Set(String),
+) -> Bool {
+  case types {
+    [] -> False
+    [ast.NamedType(_, None, n, args) | rest] ->
+      n == name or case dict.get(items, n), set.contains(seen, n) {
+        Ok(ast.TypeAlias(aliased: | _)), False ->
+          refers_to(
+            items,
+            [aliased | list.append(args, rest)],
+            name,
+            set.insert(seen, n),
+          )
+        _, _ -> refers_to(items, list.append(args, rest), name, seen)
+      }
+    [t | rest] -> refers_to(items, list.append(children(t), rest), name, seen)
+  }
+}
+
+def children(t: Type) -> List(Type) {
+  case t {
+    ast.NamedType(args: | _) -> args
+    ast.TupleType(_, ts) -> ts
+    ast.FnType(_, ps, r) -> [r | ps]
+    ast.VarType(| _) | ast.HoleType(| _) -> []
+  }
+}
+
+def last_segment(path: String) -> String {
+  string.split(path, "/") |> list.last |> result.unwrap(path)
+}
+
+def has_derive(it: Item) -> Bool {
+  list.any(attributes(it), fn(a) { a.name == attribute })
+}
+
+def attributes(it: Item) -> List(ast.Attribute) {
+  case it {
+    ast.CustomType(attributes: | _) | ast.TypeAlias(attributes: | _) | ast.ExternalType(attributes: | _) | ast.Const(attributes: | _) ->
+      attributes
+    ast.Function(clauses: | _) -> list.flat_map(clauses, fn(c) { c.attributes })
+    ast.Import(| _) -> []
+  }
+}
+
+/// `@derive` anywhere but on a custom type.
+def misplaced(it: Item) -> List(Diagnostic) {
+  attrs = case it {
+    ast.CustomType(| _) -> []
+    _ -> attributes(it)
+  }
+  attrs
+  |> list.filter(fn(a) { a.name == attribute })
+  |> list.map(fn(a) {
+    diagnostic.error(
+      "Nothing to derive",
+      a.span,
+      "`@derive` goes on a type with a constructor",
+    )
+    |> diagnostic.with_hint(
+      "Put it on the `type` that declares the record, before `pub type`.",
+    )
+  })
+}
+
+// --- Requests ----------------------------------------------------------------------
+
+/// A record type that can be derived.
+type RecordType {
+  RecordType(
+    name: String,
+    /// `pub type`, maybe opaque.
+    exported: Bool,
+    /// Whether the derived functions are public.
+    public: Bool,
+    params: List(String),
+    constructor: String,
+    fields: List((String, ast.Field)),
+  )
+}
+
+type Deriver {
+  Deriver(
+    /// As written: the module's qualifier in this module.
+    name: String,
+    /// The module path, which identifies the deriver across modules.
+    path: String,
+    span: Span,
+  )
+}
+
+type Request {
+  Request(type_: RecordType, deriver: Result(Deriver, Diagnostic))
+}
+
+def requests(it: Item, scope: Scope) -> List(Request) {
+  case it {
+    ast.CustomType(attributes: | _) -> {
+      derives = list.filter(attributes, fn(a) { a.name == attribute })
+      case derives {
+        [] -> []
+        _ -> {
+          derivers = list.flat_map(derives, fn(a) {
+            case a.args {
+              [] ->
+                [
+                  Error(
+                    diagnostic.error(
+                      "Empty derive",
+                      a.span,
+                      "name the deriver modules: `@derive(decoder)`",
+                    ),
+                  ),
+                ]
+              args -> list.map(args, deriver(_, a.span, scope))
+            }
+          })
+          derivers = duplicates(derivers)
+          case record(it) {
+            Ok(r) -> list.map(derivers, Request(r, _))
+            Error(e) -> {
+              // One error for the type, plus those of the attribute itself.
+              attr_errors = list.filter_map(derivers, fn(d) {
+                case d {
+                  Error(e) -> Ok(Request(placeholder(it), Error(e)))
+                  Ok(_) -> Error(Nil)
+                }
+              })
+              [Request(placeholder(it), Error(e)) | attr_errors]
+            }
+          }
+        }
+      }
+    }
+    _ -> []
+  }
+}
+
+def placeholder(it: Item) -> RecordType {
+  case it {
+    ast.CustomType(name: | _) -> RecordType(name, False, False, [], name, [])
+    _ -> RecordType("", False, False, [], "", [])
+  }
+}
+
+def deriver(
+  arg: ast.AttributeArg,
+  attr_span: Span,
+  scope: Scope,
+) -> Result(Deriver, Diagnostic) {
+  case arg {
+    ast.AttrString(s) ->
+      Error(
+        diagnostic.error(
+          "Invalid deriver",
+          attr_span,
+          "a deriver is a module, not a string: `\"" <> s <> "\"`",
+        )
+        |> diagnostic.with_hint("Name an imported module: `@derive(decoder)`."),
+      )
+    ast.AttrName(name, span) -> case dict.get(scope.modules, name) {
+      Ok(path) -> Ok(Deriver(name, path, span))
+      Error(_) ->
+        Error(
+          diagnostic.error(
+            "Unknown deriver",
+            span,
+            "`" <> name <> "` is not an imported module",
+          )
+          |> diagnostic.with_hint(
+            "A deriver is a module that exports `record`, `field` and `done`. Import it, e.g. `import some_package/" <> name <> "`.",
+          ),
+        )
+    }
+  }
+}
+
+def duplicates(
+  derivers: List(Result(Deriver, Diagnostic)),
+) -> List(Result(Deriver, Diagnostic)) {
+  list.fold(derivers, ([], set.new()), fn(acc, d) {
+    (out, seen) = acc
+    case d {
+      Ok(Deriver(name:, span: | _)) -> case set.contains(seen, name) {
+        True ->
+          (
+            [
+              Error(
+                diagnostic.error(
+                  "Duplicate deriver",
+                  span,
+                  "`" <> name <> "` is already derived for this type",
+                ),
+              ) |
+              out
+            ],
+            seen,
+          )
+        False -> ([d | out], set.insert(seen, name))
+      }
+      Error(_) -> ([d | out], seen)
+    }
+  })
+  |> fn(acc) { list.reverse(acc.0) }
+}
+
+/// The type as a record, or why it can't be derived.
+def record(it: Item) -> Result(RecordType, Diagnostic) {
+  case it {
+    ast.CustomType(publicity:, opaque_:, name:, name_span:, params:, variants: | _) ->
+      custom_record(publicity, opaque_, name, name_span, params, variants)
+    _ ->
+      Error(
+        diagnostic.error(
+          "Nothing to derive",
+          span.empty,
+          "`" <> item_name(it) <> "` has no constructor",
+        ),
+      )
+  }
+}
+
+def custom_record(
+  publicity: ast.Publicity,
+  opaque_: Bool,
+  name: String,
+  name_span: Span,
+  params: List(String),
+  variants: List(ast.Variant),
+) -> Result(RecordType, Diagnostic) {
+  case variants {
+    [ast.Variant(name: constructor, fields: | _)] -> {
+      use fields <- result.try(
+        list.try_map(fields, fn(f) {
+          case f.label {
+            Some(l) -> Ok((l, f))
+            None ->
+              Error(
+                diagnostic.error(
+                  "Unlabelled field",
+                  f.span,
+                  "derived functions need every field to have a label",
+                )
+                |> diagnostic.with_hint(
+                  "Name it: `" <> constructor <> "(name: ...)`.",
+                ),
+              )
+          }
+        }),
+      )
+      // The derived function uses the constructor and the fields, so it
+      // can't be more visible than they are: an opaque type keeps it private.
+      exported = publicity == ast.Public
+      Ok(
+        RecordType(
+          name,
+          exported,
+          exported and not opaque_,
+          params,
+          constructor,
+          fields,
+        ),
+      )
+    }
+    [] ->
+      Error(
+        diagnostic.error(
+          "Nothing to derive",
+          name_span,
+          "`" <> name <> "` has no constructor",
+        ),
+      )
+    _ ->
+      Error(
+        diagnostic.error(
+          "Cannot derive for `" <> name <> "`",
+          name_span,
+          "`" <> name <> "` has " <> string.inspect(
+            list.length(variants),
+          ) <> " constructors; only records (one constructor) can be derived for now",
+        )
+        |> diagnostic.with_hint(
+          "Define its function (`" <> snake_case(
+            name,
+          ) <> "_<deriver>`) yourself instead: the derived functions of other types use it.",
+        ),
+      )
+  }
+}
+
+/// For each type the module derives with a deriver: whether its function
+/// takes an argument for each of its type parameters. It does for those its
+/// fields need, which excludes one only given to a phantom parameter
+/// (`Price(currency)`) of a type derived the same way. Other types (of
+/// other modules, or written by hand) take all of theirs, so this only
+/// depends on the module.
+type Table = Dict(String, List(Bool))
+
+def table(scope: Scope, deriver: String) -> Table {
+  records = dict.fold(scope.types, [], fn(acc, name, it) {
+    case set.contains(scope.derived, (name, deriver)), it {
+      True, ast.CustomType(| _) -> case record(it) {
+        Ok(r) -> [r | acc]
+        Error(_) -> acc
+      }
+      _, _ -> acc
+    }
+  })
+  // From "needs nothing" up, until nothing changes: each round can only
+  // add parameters.
+  none = list.map(records, fn(r) {
+    (r.name, list.map(r.params, fn(_) { False }))
+  })
+  fixpoint(scope, records, dict.from_list(none))
+}
+
+def fixpoint(scope: Scope, records: List(RecordType), table: Table) -> Table {
+  next =
+    list.map(records, fn(r) {
+      used = list.fold(r.fields, set.new(), fn(acc, f) {
+        set.union(
+          acc,
+          needs(
+            scope,
+            table,
+            {
+              f.1
+            }.type_,
+          ),
+        )
+      })
+      (r.name, list.map(r.params, set.contains(used, _)))
+    })
+    |> dict.from_list
+  case next == table {
+    True -> table
+    False -> fixpoint(scope, records, next)
+  }
+}
+
+def needs(scope: Scope, table: Table, t: Type) -> Set(String) {
+  all = fn(args) {
+    list.fold(args, set.new(), fn(acc, a) {
+      set.union(acc, needs(scope, table, a))
+    })
+  }
+  case t {
+    ast.VarType(_, n) -> set.from_list([n])
+    ast.NamedType(_, None, name, args) -> case dict.get(table, name), dict.get(
+      scope.aliases,
+      name,
+    ) {
+      Ok(wanted), _ ->
+        list.zip(args, wanted)
+        |> list.filter(fn(a) { a.1 })
+        |> list.map(fn(a) { a.0 })
+        |> all
+      _, Ok((params, aliased)) ->
+        needs(scope, table, substitute(aliased, params, args, t.span))
+      _, _ -> all(args)
+    }
+    _ -> all(children(t))
+  }
+}
+
+def capabilities(r: RecordType, table: Table) -> List(Bool) {
+  dict.get(table, r.name)
+  |> result.unwrap(list.map(r.params, fn(_) { True }))
+}
+
+/// Derived names that are already taken.
+def clashes(requests: List(Request), scope: Scope) -> List(Diagnostic) {
+  list.fold(requests, ([], scope.values), fn(acc, r) {
+    (errors, taken) = acc
+    case r.deriver {
+      Ok(d) -> {
+        name = function_name(r.type_.name, d.name)
+        case set.contains(taken, name) {
+          True ->
+            (
+              [
+                diagnostic.error(
+                  "Duplicate definition",
+                  d.span,
+                  "`@derive(" <> d.name <> ")` defines `" <> name <> "`, which is already defined",
+                )
+                |> diagnostic.with_hint(
+                  "Rename the other definition, or import the deriver under another name (`import ... as " <> d.name <> "2`).",
+                ) |
+                errors
+              ],
+              taken,
+            )
+          False -> (errors, set.insert(taken, name))
+        }
+      }
+      Error(_) -> acc
+    }
+  })
+  |> fn(acc) { list.reverse(acc.0) }
+}
+
+// --- Deriving ----------------------------------------------------------------------
+
+type Env {
+  Env(
+    deriver: Deriver,
+    scope: Scope,
+    ctx: codegen.Context,
+    /// Type parameter -> the parameter holding its capability.
+    caps: Dict(String, String),
+    /// The type being derived, to report recursion.
+    root: String,
+    table: Table,
+  )
+}
+
+/// A field's capability, and the names it refers to.
+type Capability {
+  Capability(expr: Expr, vars: Set(String), names: Set(String))
+}
+
+def derive_record(
+  r: RecordType,
+  d: Deriver,
+  scope: Scope,
+  ctx: codegen.Context,
+) -> Result(Item, List(Diagnostic)) {
+  s = d.span
+  table = table(scope, d.name)
+  used = capabilities(r, table)
+  cap_params =
+    list.zip(r.params, used)
+    |> list.filter(fn(p) { p.1 })
+    |> list.map(fn(p) { p.0 })
+  reserved =
+    set.from_list([d.name | list.map(r.fields, fn(f) { f.0 })])
+    |> set.union(scope.values)
+  (caps, _) = list.fold(cap_params, (dict.new(), reserved), fn(acc, p) {
+    name = fresh(p <> "_" <> d.name, acc.1)
+    (dict.insert(acc.0, p, name), set.insert(acc.1, name))
+  })
+  env = Env(d, scope, ctx, caps, r.name, table)
+  (fields, errors) = list.fold(r.fields, ([], []), fn(acc, f) {
+    case capability(
+      env,
+      {
+        f.1
+      }.type_,
+    ) {
+      Ok(c) -> ([(f, c) | acc.0], acc.1)
+      Error(e) -> (acc.0, [e | acc.1])
+    }
+  })
+  use <- guard(errors)
+  fields = list.reverse(fields)
+
+  // Bind each field to its label, unless that would shadow a name a later
+  // field needs (the deriver, another module, a capability parameter).
+  names = list.fold(
+    fields,
+    set.from_list([d.name | dict.values(caps)]),
+    fn(acc, f) {
+      set.union(
+        acc,
+        {
+          f.1
+        }.names,
+      )
+    },
+  )
+  bindings =
+    list.fold(fields, ([], set.new()), fn(acc, f) {
+      (label, _) = f.0
+      name = fresh(label, set.union(names, acc.1))
+      ([name | acc.0], set.insert(acc.1, name))
+    })
+    |> fn(acc) { list.reverse(acc.0) }
+
+  deriver = fn(member) { ast.FieldAccess(s, ast.Var(s, d.name), member, s) }
+  self_type = ast.NamedType(
+    s,
+    None,
+    r.name,
+    list.map(r.params, ast.VarType(s, _)),
+  )
+  uses = list.map2(fields, bindings, fn(f, binding) {
+    ((label, field), c) = f
+    fs = field.span
+    getter = ast.Fn(
+      fs,
+      [ast.FnParam(fs, ast.PVar(fs, "value"), Some(self_type))],
+      None,
+      [ast.Expression(ast.FieldAccess(fs, ast.Var(fs, "value"), label, fs))],
+    )
+    ast.Use(
+      fs,
+      [ast.UsePattern(fs, ast.PVar(fs, binding), None)],
+      ast.Call(fs, deriver("field"), [
+        ast.Arg(fs, None, Some(string_lit(label, fs))),
+        ast.Arg(fs, None, Some(c.expr)),
+        ast.Arg(fs, None, Some(getter)),
+      ]),
+    )
+  })
+  value = case r.fields {
+    [] -> ast.Constructor(s, None, r.constructor)
+    _ ->
+      ast.Call(
+        s,
+        ast.Constructor(s, None, r.constructor),
+        list.map2(r.fields, bindings, fn(f, binding) {
+          case f.0 == binding {
+            True -> ast.Arg(s, Some(f.0), None)
+            False -> ast.Arg(s, Some(f.0), Some(ast.Var(s, binding)))
+          }
+        }),
+      )
+  }
+  done = ast.Expression(
+    ast.Call(s, deriver("done"), [ast.Arg(s, None, Some(value))]),
+  )
+  record = ast.Use(
+    s,
+    [],
+    ast.Call(s, deriver("record"), [
+      ast.Arg(s, None, Some(string_lit(r.constructor, s))),
+    ]),
+  )
+  vars = list.fold(fields, set.new(), fn(acc, f) {
+    set.union(
+      acc,
+      {
+        f.1
+      }.vars,
+    )
+  })
+  params = list.map(cap_params, fn(p) {
+    Ok(name) = dict.get(caps, p)
+    // A parameter only phantom types use (`Money(currency)` in a field)
+    // is still taken, so that callers needn't know.
+    name = case set.contains(vars, p) {
+      True -> name
+      False -> "_" <> name
+    }
+    ast.Param(s, None, ast.PVar(s, name), None)
+  })
+  name = function_name(r.name, d.name)
+  clause = ast.Clause(
+    span: s,
+    doc: [" Derived by `@derive(" <> d.name <> ")` on `" <> r.name <> "`."],
+    attributes: [],
+    publicity: case r.public {
+      True -> ast.Public
+      False -> ast.Private
+    },
+    name_span: s,
+    params:,
+    return_type: None,
+    guard: None,
+    body: Some([record | list.append(uses, [done])]),
+  )
+  Ok(ast.Function(s, name, s, [clause]))
+}
+
+def guard(
+  errors: List(e),
+  next: fn() -> Result(a, List(e)),
+) -> Result(a, List(e)) {
+  case errors {
+    [] -> next()
+    _ -> Error(list.reverse(errors))
+  }
+}
+
+def string_lit(text: String, s: Span) -> Expr {
+  ast.String(s, [ast.Text(escape(text), s)])
+}
+
+def escape(text: String) -> String {
+  text |> string.replace("\\", "\\\\") |> string.replace("\"", "\\\"")
+}
+
+def fresh(name: String, taken: Set(String)) -> String {
+  case set.contains(taken, name) {
+    True -> fresh(name <> "_", taken)
+    False -> name
+  }
+}
+
+/// The capability for a field type.
+def capability(env: Env, t: Type) -> Result(Capability, Diagnostic) {
+  case t {
+    ast.VarType(s, n) -> case dict.get(env.caps, n) {
+      Ok(p) -> Ok(Capability(ast.Var(s, p), set.from_list([n]), set.new()))
+      Error(_) ->
+        Error(
+          diagnostic.error(
+            "Unknown type variable",
+            s,
+            "`" <> n <> "` is not a parameter of the type",
+          ),
+        )
+    }
+    ast.NamedType(s, None, name, args) -> case dict.get(env.scope.types, name) {
+      Ok(local) -> local_type(env, s, local, args)
+      Error(_) -> case dict.get(env.scope.imported_types, name) {
+        Ok((path, qualifier, original)) ->
+          other_module(env, s, path, qualifier, original, args)
+        Error(_) -> from_deriver(env, s, name, args)
+      }
+    }
+    ast.NamedType(s, Some(q), name, args) -> case dict.get(
+      env.scope.modules,
+      q,
+    ) {
+      Ok(path) -> other_module(env, s, path, q, name, args)
+      Error(_) -> from_deriver(env, s, name, args)
+    }
+    ast.TupleType(s, _) ->
+      unsupported(s, "a tuple", "Use a record with labelled fields instead.")
+    ast.FnType(s, _, _) ->
+      unsupported(s, "a function", "Functions can't be derived from data.")
+    ast.HoleType(s, _) ->
+      unsupported(s, "a `_`", "Write the field's type out in full.")
+  }
+}
+
+def unsupported(s: Span, what: String, hint: String) -> Result(a, Diagnostic) {
+  Error(
+    diagnostic.error(
+      "Unsupported field type",
+      s,
+      "a field whose type is " <> what <> " can't be derived",
+    )
+    |> diagnostic.with_hint(hint),
+  )
+}
+
+/// The capabilities for a type's arguments: the ones `wanted`.
+def arguments(
+  env: Env,
+  args: List(Type),
+  wanted: List(Bool),
+) -> Result((List(ast.Arg), Set(String), Set(String)), Diagnostic) {
+  args = case list.length(wanted) == list.length(args) {
+    True ->
+      list.zip(args, wanted)
+      |> list.filter(fn(a) { a.1 })
+      |> list.map(fn(a) { a.0 })
+    // An arity mismatch is Gleam's to report.
+    False -> args
+  }
+  list.try_map(args, capability(env, _)) |> result.map(arguments_of)
+}
+
+def arguments_of(
+  caps: List(Capability),
+) -> (List(ast.Arg), Set(String), Set(String)) {
+  (
+    list.map(caps, fn(c) { ast.Arg(c.expr.span, None, Some(c.expr)) }),
+    list.fold(caps, set.new(), fn(acc, c) { set.union(acc, c.vars) }),
+    list.fold(caps, set.new(), fn(acc, c) { set.union(acc, c.names) }),
+  )
+}
+
+def all(args: List(Type)) -> List(Bool) {
+  list.map(args, fn(_) { True })
+}
+
+def local_type(
+  env: Env,
+  s: Span,
+  item: Item,
+  args: List(Type),
+) -> Result(Capability, Diagnostic) {
+  d = env.deriver
+  name = item_name(item)
+  f = function_name(name, d.name)
+  case item {
+    // A type alias stands for its definition.
+    ast.TypeAlias(params: | _) -> case dict.get(env.scope.aliases, name) {
+      Ok((_, aliased)) -> {
+        use <- arity(s, name, params, args)
+        capability(env, substitute(aliased, params, args, s))
+      }
+      Error(_) ->
+        Error(
+          diagnostic.error(
+            "Recursive type alias",
+            s,
+            "`" <> name <> "` is defined in terms of itself",
+          ),
+        )
+    }
+    _ -> case item, set.contains(
+      env.scope.derived,
+      (name, d.name),
+    ), set.contains(env.scope.values, f) {
+      ast.CustomType(| _), True, _ -> derived_here(env, s, name, f, args)
+      // Written by hand, for a type that can't be derived (a union, a
+      // recursive type, an external type) or shouldn't be. It takes an
+      // argument per type parameter.
+      _, False, True -> by_convention(env, s, ast.Var(s, f), f, args)
+      _, _, _ -> {
+        hint = case record(item) {
+          Ok(_) ->
+            "Add `@derive(" <> d.name <> ")` to the type `" <> name <> "`, or define `" <> f <> "` yourself."
+          Error(_) ->
+            "`" <> name <> "` can't be derived, but you can define `" <> f <> "` yourself: the derived functions use it."
+        }
+        Error(
+          diagnostic.error(
+            "Missing derive",
+            s,
+            "`" <> name <> "` doesn't derive `" <> d.name <> "`",
+          )
+          |> diagnostic.with_hint(hint),
+        )
+      }
+    }
+  }
+}
+
+def derived_here(
+  env: Env,
+  s: Span,
+  name: String,
+  f: String,
+  args: List(Type),
+) -> Result(Capability, Diagnostic) {
+  reached = reachable(
+    env.scope,
+    env.deriver.name,
+    [ast.NamedType(s, None, name, [])],
+    set.new(),
+  )
+  case set.contains(reached, env.root) {
+    True ->
+      Error(
+        diagnostic.error(
+          "Recursive type",
+          s,
+          "`" <> env.root <> "` contains itself through this field; recursive types can't be derived yet",
+        )
+        |> diagnostic.with_hint(
+          "Define `" <> function_name(
+            env.root,
+            env.deriver.name,
+          ) <> "` yourself instead of deriving it: the derived functions of other types use it.",
+        ),
+      )
+    False -> {
+      wanted = dict.get(env.table, name) |> result.unwrap(all(args))
+      use (call_args, vars, names) <- result.try(arguments(env, args, wanted))
+      Ok(
+        Capability(
+          ast.Call(s, ast.Var(s, f), call_args),
+          vars,
+          set.insert(names, f),
+        ),
+      )
+    }
+  }
+}
+
+/// The module's types whose derived functions deriving `types` calls,
+/// directly or not.
+def reachable(
+  scope: Scope,
+  deriver: String,
+  types: List(Type),
+  seen: Set(String),
+) -> Set(String) {
+  case types {
+    [] -> seen
+    [ast.NamedType(_, None, name, args) | rest] -> {
+      rest = list.append(args, rest)
+      more = case set.contains(seen, name), dict.get(scope.types, name) {
+        False, Ok(ast.CustomType(variants: [v] | _)) -> case set.contains(
+          scope.derived,
+          (name, deriver),
+        ) {
+          True -> Ok(list.map(v.fields, fn(f) { f.type_ }))
+          False -> Error(Nil)
+        }
+        False, Ok(ast.TypeAlias(| _)) -> case dict.get(scope.aliases, name) {
+          Ok((_, aliased)) -> Ok([aliased])
+          Error(_) -> Error(Nil)
+        }
+        _, _ -> Error(Nil)
+      }
+      case more {
+        Ok(more) ->
+          reachable(
+            scope,
+            deriver,
+            list.append(more, rest),
+            set.insert(seen, name),
+          )
+        Error(_) -> reachable(scope, deriver, rest, seen)
+      }
+    }
+    [t | rest] ->
+      reachable(scope, deriver, list.append(children(t), rest), seen)
+  }
+}
+
+def item_name(item: Item) -> String {
+  case item {
+    ast.CustomType(name: | _) | ast.TypeAlias(name: | _) | ast.ExternalType(name: | _) ->
+      name
+    _ -> ""
+  }
+}
+
+def arity(
+  s: Span,
+  name: String,
+  params: List(String),
+  args: List(Type),
+  next: fn() -> Result(a, Diagnostic),
+) -> Result(a, Diagnostic) {
+  case list.length(params) == list.length(args) {
+    True -> next()
+    False ->
+      Error(
+        diagnostic.error(
+          "Wrong number of type arguments",
+          s,
+          "`" <> name <> "` takes " <> int.to_string(
+            list.length(params),
+          ) <> " type argument(s), not " <> int.to_string(list.length(args)),
+        ),
+      )
+  }
+}
+
+/// An alias's definition with its parameters replaced, positioned at `s`.
+def substitute(
+  t: Type,
+  params: List(String),
+  args: List(Type),
+  s: Span,
+) -> Type {
+  replace(t, dict.from_list(list.zip(params, args)), s)
+}
+
+def replace(t: Type, subst: Dict(String, Type), s: Span) -> Type {
+  case t {
+    ast.VarType(_, n) -> dict.get(subst, n) |> result.unwrap(t)
+    ast.NamedType(_, m, n, args) ->
+      ast.NamedType(s, m, n, list.map(args, replace(_, subst, s)))
+    ast.TupleType(_, ts) -> ast.TupleType(s, list.map(ts, replace(_, subst, s)))
+    ast.FnType(_, ps, r) ->
+      ast.FnType(s, list.map(ps, replace(_, subst, s)), replace(r, subst, s))
+    ast.HoleType(| _) -> t
+  }
+}
+
+/// A type from another module: the project's Bea modules define their own
+/// types' functions; for anything else, the deriver speaks.
+def other_module(
+  env: Env,
+  s: Span,
+  path: String,
+  qualifier: String,
+  name: String,
+  args: List(Type),
+) -> Result(Capability, Diagnostic) {
+  alias =
+    dict.get(env.ctx.aliases, path)
+    |> result.try(dict.get(_, name))
+  derived =
+    dict.get(env.ctx.derived, path)
+    |> result.try(
+      list.find(_, fn(e) {
+        e.type_name == name and e.deriver == env.deriver.path
+      }),
+    )
+  case dict.has_key(env.ctx.derived, path), alias, derived {
+    // A package's type, or no project to know.
+    False, _, _ -> from_deriver(env, s, name, args)
+    True, Ok((params, aliased)), _ -> {
+      use <- arity(s, qualifier <> "." <> name, params, args)
+      portable_capability(
+        env,
+        s,
+        aliased,
+        dict.from_list(list.zip(params, args)),
+      )
+    }
+    True, _, Ok(e) if e.public -> {
+      use (call_args, vars, names) <- result.try(
+        arguments(env, args, e.capabilities),
+      )
+      Ok(
+        Capability(
+          ast.Call(
+            s,
+            ast.FieldAccess(s, ast.Var(s, qualifier), e.function, s),
+            call_args,
+          ),
+          vars,
+          set.insert(names, qualifier),
+        ),
+      )
+    }
+    True, _, Ok(e) ->
+      Error(
+        diagnostic.error(
+          "Private derived function",
+          s,
+          "`" <> name <> "` is opaque, so `" <> e.function <> "` is private to `" <> path <> "`",
+        )
+        |> diagnostic.with_hint(
+          "Use the type's public API in a function written by hand in `" <> path <> "`.",
+        ),
+      )
+    // Not derived there: maybe written by hand. Gleam says if it isn't.
+    True, _, Error(_) ->
+      by_convention(
+        env,
+        s,
+        ast.FieldAccess(
+          s,
+          ast.Var(s, qualifier),
+          function_name(name, env.deriver.name),
+          s,
+        ),
+        qualifier,
+        args,
+      )
+  }
+}
+
+/// The capability for the definition of another module's alias, which
+/// only names the prelude and the standard library; its parameters are
+/// this module's types.
+def portable_capability(
+  env: Env,
+  s: Span,
+  t: Type,
+  subst: Dict(String, Type),
+) -> Result(Capability, Diagnostic) {
+  case t {
+    ast.VarType(_, n) -> case dict.get(subst, n) {
+      Ok(arg) -> capability(env, arg)
+      Error(_) -> unsupported(s, "an unknown type variable", "")
+    }
+    ast.NamedType(_, _, name, args) -> {
+      use caps <- result.try(
+        list.try_map(args, portable_capability(env, s, _, subst)),
+      )
+      (call_args, vars, names) = arguments_of(caps)
+      Ok(Capability(ast.Call(s, member(env, s, name), call_args), vars, names))
+    }
+    _ -> unsupported(s, "an alias of another module", "Write the type out.")
+  }
+}
+
+/// `<type>_<deriver>(...)` with a capability for every argument.
+def by_convention(
+  env: Env,
+  s: Span,
+  function: Expr,
+  name: String,
+  args: List(Type),
+) -> Result(Capability, Diagnostic) {
+  use (call_args, vars, names) <- result.try(arguments(env, args, all(args)))
+  Ok(
+    Capability(ast.Call(s, function, call_args), vars, set.insert(names, name)),
+  )
+}
+
+/// The deriver's own capability for a type: `decoder.string()`,
+/// `decoder.list(decoder.int())`.
+def from_deriver(
+  env: Env,
+  s: Span,
+  name: String,
+  args: List(Type),
+) -> Result(Capability, Diagnostic) {
+  use (call_args, vars, names) <- result.try(arguments(env, args, all(args)))
+  Ok(Capability(ast.Call(s, member(env, s, name), call_args), vars, names))
+}
+
+def member(env: Env, s: Span, type_name: String) -> Expr {
+  ast.FieldAccess(s, ast.Var(s, env.deriver.name), snake_case(type_name), s)
+}

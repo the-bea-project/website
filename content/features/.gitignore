@@ -1,0 +1,3 @@
+.beabuild/
+build/
+erl_crash.dump

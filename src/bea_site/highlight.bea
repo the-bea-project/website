@@ -1,0 +1,515 @@
+//// A small highlighter for Bea and Gleam (plus shell, TOML and program
+//// output). The build runs it on every code block, so highlighted HTML
+//// ships in the pages, and the playground runs the same code in the
+//// browser on every keystroke.
+////
+//// Token classes (styled in assets/style.css):
+////
+//// | class | what                      | class | what                        |
+//// | ----- | ------------------------- | ----- | --------------------------- |
+//// | `c`   | comment                   | `s`   | string                      |
+//// | `e`   | escape, `#{` `}`          | `n`   | number                      |
+//// | `k`   | keyword                   | `x`   | Bea control flow: `return`, `?`, `else` guards |
+//// | `t`   | type, constructor         | `f`   | function name               |
+//// | `o`   | operator                  | `a`   | attribute (`@derive`)       |
+//// | `p`   | prompt, dimmed line       |       |                             |
+
+import gleam/regexp
+import lustre/attribute
+import lustre/element.{type Element}
+import lustre/element/html
+
+/// A run of text, and its class: "" for plain text.
+pub type Token { class: String, text: String }
+
+pub type Lang {
+  Bea
+  Gleam
+  Shell
+  Toml
+  Output
+  Text
+}
+
+pub def lang_name(Bea) {
+  "bea"
+}
+pub def lang_name(Gleam) {
+  "gleam"
+}
+pub def lang_name(Shell) {
+  "sh"
+}
+pub def lang_name(Toml) {
+  "toml"
+}
+pub def lang_name(Output) {
+  "output"
+}
+pub def lang_name(Text) {
+  "text"
+}
+
+const bea_keywords = [
+  "def",
+  "fn",
+  "pub",
+  "type",
+  "opaque",
+  "const",
+  "import",
+  "as",
+  "if",
+  "else",
+  "cond",
+  "case",
+  "use",
+  "echo",
+  "todo",
+  "panic",
+  "assert",
+  "and",
+  "or",
+  "not",
+]
+
+const gleam_keywords = [
+  "fn",
+  "pub",
+  "type",
+  "opaque",
+  "const",
+  "import",
+  "as",
+  "if",
+  "case",
+  "use",
+  "echo",
+  "todo",
+  "panic",
+  "assert",
+  "let",
+]
+
+/// The tokens of `source`. Concatenating their texts gives `source` back.
+pub def tokens(source: String, lang: Lang) -> List(Token) {
+  case lang {
+    Bea | Gleam -> {
+      (acc, _) = code(string.to_graphemes(source), lang, False, 0, "", "", [])
+      list.reverse(acc)
+    }
+    Shell -> by_line(source, shell_line)
+    Toml -> by_line(source, toml_line)
+    Output -> by_line(source, output_line)
+    Text -> [Token("", source)]
+  }
+}
+
+/// Highlighted HTML: `<span class="tk-k">def</span> main…`.
+pub def view(source: String, lang: Lang) -> List(Element(msg)) {
+  tokens(source, lang) |> list.map(token_view)
+}
+
+pub def token_view(token: Token) -> Element(msg) {
+  case token.class {
+    "" -> html.text(token.text)
+    class ->
+      html.span([attribute.class("tk-" <> class)], [html.text(token.text)])
+  }
+}
+
+// --- Bea and Gleam ---------------------------------------------------------------
+
+/// Adds a token, merging plain text into the plain text before it.
+def push(acc: List(Token), class: String, text: String) -> List(Token) {
+  case class, acc {
+    _, _ if text == "" -> acc
+    "", [Token("", before) | rest] -> [Token("", before <> text) | rest]
+    _, _ -> [Token(class, text) | acc]
+  }
+}
+
+/// Scans code. Inside `#{…}` (`in_braces`), stops before the `}` that
+/// closes it and returns the characters from there.
+def code(
+  chars: List(String),
+  lang: Lang,
+  in_braces: Bool,
+  depth: Int,
+  prev_word: String,
+  prev_char: String,
+  acc: List(Token),
+) -> (List(Token), List(String)) {
+  bea = lang == Bea
+  case chars {
+    [] -> (acc, [])
+    ["}" | _] if in_braces and depth == 0 -> (acc, chars)
+    ["/", "/" | _] -> {
+      (comment, rest) = split_while(chars, fn(c) { c != "\n" })
+      code(
+        rest,
+        lang,
+        in_braces,
+        depth,
+        prev_word,
+        prev_char,
+        push(acc, "c", comment),
+      )
+    }
+    ["\"" | rest] -> {
+      (acc, rest) = string_literal(rest, lang, push(acc, "s", "\""))
+      code(rest, lang, in_braces, depth, "", "\"", acc)
+    }
+    ["`" | rest] if bea -> {
+      (raw, rest) = split_while(rest, fn(c) { c != "`" })
+      (close, rest) = case rest {
+        ["`" | rest] -> ("`", rest)
+        _ -> ("", rest)
+      }
+      code(
+        rest,
+        lang,
+        in_braces,
+        depth,
+        prev_word,
+        "`",
+        push(acc, "s", "`" <> raw <> close),
+      )
+    }
+    ["?" | rest] if bea ->
+      code(rest, lang, in_braces, depth, prev_word, "?", push(acc, "x", "?"))
+    [c | rest] -> {
+      second = list.first(rest) |> result.unwrap("")
+      cond {
+        is_number_start(c) -> {
+          (number, rest) = number(chars)
+          code(
+            rest,
+            lang,
+            in_braces,
+            depth,
+            prev_word,
+            "0",
+            push(acc, "n", number),
+          )
+        }
+        c == "@" and is_lower(second) -> {
+          (name, rest) = split_while(rest, is_ident)
+          code(
+            rest,
+            lang,
+            in_braces,
+            depth,
+            prev_word,
+            "a",
+            push(acc, "a", "@" <> name),
+          )
+        }
+        is_upper(c) or is_ident_start(c) -> {
+          (word, rest) = split_while(chars, is_ident)
+          class = word_class(word, rest, lang, prev_word, prev_char)
+          code(rest, lang, in_braces, depth, word, "a", push(acc, class, word))
+        }
+        _ -> case operator(chars) {
+          Ok((op, rest)) ->
+            code(
+              rest,
+              lang,
+              in_braces,
+              depth,
+              prev_word,
+              string.slice(op, -1, 1),
+              push(acc, "o", op),
+            )
+          Error(_) -> {
+            depth = case c {
+              "{" if in_braces -> depth + 1
+              "}" if in_braces -> depth - 1
+              _ -> depth
+            }
+            // Spaces keep what came before: `def  main`, `f() else`.
+            (prev_word, prev_char) = if is_space(c) {
+              (prev_word, prev_char)
+            } else {
+              ("", c)
+            }
+            code(
+              rest,
+              lang,
+              in_braces,
+              depth,
+              prev_word,
+              prev_char,
+              push(acc, "", c),
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+def word_class(
+  word: String,
+  rest: List(String),
+  lang: Lang,
+  prev_word: String,
+  prev_char: String,
+) -> String {
+  keywords = if lang == Bea {
+    bea_keywords
+  } else {
+    gleam_keywords
+  }
+  after = skip_spaces(rest)
+  cond {
+    is_upper(string.slice(word, 0, 1)) -> "t"
+    lang == Bea and word == "return" -> "x"
+    // `else` after a guard's pattern (`x = f() else …`) is Bea's own control
+    // flow too; `} else {` is the ordinary keyword.
+    lang == Bea and word == "else" and prev_char != "}" and prev_char != "" ->
+      "x"
+    list.contains(keywords, word) and not label_follows(
+      after,
+    ) and prev_char != "." -> "k"
+    word == "_" -> ""
+    prev_word == "def" or prev_word == "fn" -> "f"
+    list.first(rest) == Ok("(") -> "f"
+    _ -> ""
+  }
+}
+
+/// `name:` is a label, not the keyword `name` (but `::` is not a label).
+def label_follows([":", ":" | _]) {
+  False
+}
+def label_follows([":" | _]) {
+  True
+}
+def label_follows(_) {
+  False
+}
+
+def string_literal(
+  chars: List(String),
+  lang: Lang,
+  acc: List(Token),
+) -> (List(Token), List(String)) {
+  bea = lang == Bea
+  case chars {
+    [] -> (acc, [])
+    ["\"" | rest] -> (push(acc, "s", "\""), rest)
+    ["\\", c | rest] -> string_literal(rest, lang, push(acc, "e", "\\" <> c))
+    ["#", "{" | rest] if bea -> {
+      (acc, rest) = code(rest, lang, True, 0, "", "", push(acc, "e", "\#{"))
+      case rest {
+        ["}" | rest] -> string_literal(rest, lang, push(acc, "e", "}"))
+        _ -> (acc, rest)
+      }
+    }
+    [c | rest] -> string_literal(rest, lang, push(acc, "s", c))
+  }
+}
+
+/// `0xFF`, `0b1010`, `0o17`, `1_000`, `2.5`, `2.5e-3`.
+def number(chars: List(String)) -> (String, List(String)) {
+  case chars {
+    ["0", x | rest] if x == "x" or x == "X" ->
+      prefixed("0" <> x, rest, "0123456789abcdefABCDEF_")
+    ["0", b | rest] if b == "b" or b == "B" -> prefixed("0" <> b, rest, "01_")
+    ["0", o | rest] if o == "o" or o == "O" ->
+      prefixed("0" <> o, rest, "01234567_")
+    _ -> {
+      (whole, rest) = split_while(chars, is_digit)
+      (fraction, rest) = case rest {
+        ["." | rest] -> {
+          (digits, rest) = split_while(rest, is_digit)
+          ("." <> digits, rest)
+        }
+        _ -> ("", rest)
+      }
+      (exponent, rest) = exponent(rest)
+      (whole <> fraction <> exponent, rest)
+    }
+  }
+}
+
+def prefixed(
+  prefix: String,
+  chars: List(String),
+  allowed: String,
+) -> (String, List(String)) {
+  (digits, rest) = split_while(chars, string.contains(allowed, _))
+  (prefix <> digits, rest)
+}
+
+def exponent(chars: List(String)) -> (String, List(String)) {
+  case chars {
+    [e | rest] if e == "e" or e == "E" -> {
+      (sign, rest) = case rest {
+        ["-" | rest] -> ("-", rest)
+        _ -> ("", rest)
+      }
+      (digits, rest) = split_while(rest, is_digit)
+      if digits == "" {
+        ("", chars)
+      } else {
+        (e <> sign <> digits, rest)
+      }
+    }
+    _ -> ("", chars)
+  }
+}
+
+// --- Line-based languages ------------------------------------------------------
+
+def by_line(source: String, line: fn(String) -> List(Token)) -> List(Token) {
+  source
+  |> string.split("\n")
+  |> list.map(line)
+  |> list.intersperse([Token("", "\n")])
+  |> list.flatten
+  |> list.fold([], fn(acc, t) { push(acc, t.class, t.text) })
+  |> list.reverse
+}
+
+/// `$ bea run   # a comment`: the prompt dimmed, the command as a keyword.
+def shell_line(line: String) -> List(Token) {
+  if string.starts_with(string.trim_start(line), "#") {
+    return [Token("c", line)]
+  }
+  (prompt, line) = case line {
+    "$ " <> rest -> ("$ ", rest)
+    _ -> ("", line)
+  }
+  (command, rest) = split_while(string.to_graphemes(line), fn(c) {
+    not is_space(c)
+  })
+  rest = string.concat(rest)
+  (args, comment) = case string.split_once(rest, "#") {
+    Ok((args, comment)) -> (args, "#" <> comment)
+    Error(_) -> (rest, "")
+  }
+  [
+    Token("p", prompt),
+    Token("k", command),
+    Token("", args),
+    Token("c", comment),
+  ]
+  |> list.filter(fn(t) { t.text != "" })
+}
+
+def toml_line(line: String) -> List(Token) {
+  trimmed = string.trim(line)
+  Ok(pair) = regexp.from_string("^(\\s*[A-Za-z0-9_.-]+)(\\s*=\\s*)(.*)$")
+    else panic
+  cond {
+    string.starts_with(trimmed, "#") -> [Token("c", line)]
+    string.starts_with(trimmed, "[") and string.ends_with(trimmed, "]") ->
+      [Token("t", line)]
+    _ -> case regexp.scan(pair, line) {
+      [regexp.Match(submatches: [Some(key), Some(eq), value] | _)] ->
+        [Token("f", key), Token("o", eq) | toml_value(option.unwrap(value, ""))]
+      _ -> [Token("", line)]
+    }
+  }
+}
+
+/// Strings in a TOML value; the rest stays plain.
+def toml_value(value: String) -> List(Token) {
+  case string.split_once(value, "\"") {
+    Error(_) -> [Token("", value)]
+    Ok((before, after)) -> case string.split_once(after, "\"") {
+      Ok((inside, rest)) ->
+        [
+          Token("", before),
+          Token("s", "\"" <> inside <> "\"") |
+          toml_value(rest)
+        ]
+      Error(_) -> [Token("", value)]
+    }
+  }
+}
+
+/// `echo` prints `src/file.bea:12` above each value: those lines are dimmed.
+def output_line(line: String) -> List(Token) {
+  Ok(location) = regexp.from_string("^\\S+\\.(bea|gleam):\\d+$") else panic
+  if regexp.check(location, line) {
+    [Token("p", line)]
+  } else {
+    [Token("", line)]
+  }
+}
+
+// --- Characters ---------------------------------------------------------------------
+
+def split_while(
+  chars: List(String),
+  keep: fn(String) -> Bool,
+) -> (String, List(String)) {
+  (taken, rest) = list.split_while(chars, keep)
+  (string.concat(taken), rest)
+}
+
+/// The operator `chars` start with, longest first (`|>` before `|`).
+def operator(chars: List(String)) -> Result((String, List(String)), Nil) {
+  case chars {
+    [">", "=", "." | rest] -> Ok((">=.", rest))
+    ["<", "=", "." | rest] -> Ok(("<=.", rest))
+    [a, b | rest] -> case a <> b {
+      "|>" | "<>" | "->" | "<-" | "==" | "!=" | ">=" | "<=" | ">." | "<." | "+." | "-." | "*." | "/." | "&&" | "||" | "<<" | ">>" | ".." ->
+        Ok((a <> b, rest))
+      _ -> single(chars)
+    }
+    _ -> single(chars)
+  }
+}
+
+def single(chars: List(String)) -> Result((String, List(String)), Nil) {
+  case chars {
+    [c | rest] -> case c {
+      "=" | ">" | "<" | "+" | "-" | "*" | "/" | "%" | "|" | "!" -> Ok((c, rest))
+      _ -> Error(Nil)
+    }
+    [] -> Error(Nil)
+  }
+}
+
+def skip_spaces(chars: List(String)) -> List(String) {
+  list.drop_while(chars, is_space)
+}
+
+def is_space(c: String) -> Bool {
+  c == " " or c == "\n" or c == "\t" or c == "\r"
+}
+
+// `c` is one grapheme. (Not `string.length`: on JavaScript it segments the
+// text, and this runs for every character the playground highlights.)
+
+def one_of(c: String, chars: String) -> Bool {
+  c != "" and string.contains(chars, c)
+}
+
+def is_upper(c: String) -> Bool {
+  one_of(c, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+def is_lower(c: String) -> Bool {
+  one_of(c, "abcdefghijklmnopqrstuvwxyz")
+}
+
+def is_number_start(c: String) -> Bool {
+  one_of(c, "0123456789")
+}
+
+def is_digit(c: String) -> Bool {
+  one_of(c, "0123456789_")
+}
+
+def is_ident_start(c: String) -> Bool {
+  is_lower(c) or c == "_"
+}
+
+def is_ident(c: String) -> Bool {
+  is_upper(c) or is_ident_start(c) or is_number_start(c)
+}

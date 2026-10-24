@@ -1,0 +1,17 @@
+//// The playground's example picker: the home page snippets and every tour
+//// lesson. The build writes them into the playground page as JSON and the
+//// browser reads them back, both with functions `@derive` writes.
+
+import bea_json/decoder
+import bea_json/encoder
+
+@derive(decoder, encoder)
+pub type Example { slug: String, title: String, group: String, code: String }
+
+pub def to_json(examples: List(Example)) -> String {
+  encoder.to_string(examples, encoder.list(Example.encoder()))
+}
+
+pub def from_json(json: String) -> List(Example) {
+  decoder.from_json(json, decoder.list(Example.decoder())) |> result.unwrap([])
+}

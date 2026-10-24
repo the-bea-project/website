@@ -1,0 +1,35 @@
+//// Where things live.
+
+pub const repo = "https://github.com/the-bea-project/bea"
+
+pub const issues = "https://github.com/the-bea-project/bea/issues"
+
+/// This site's own source.
+pub const site_repo = "https://github.com/the-bea-project/website"
+
+/// The current release. Releases carry a standalone `bea` for Linux (x86-64).
+pub const release_version = "0.3.0"
+
+pub const release = "https://github.com/the-bea-project/bea/releases/tag/v0.3.0"
+
+pub const releases = "https://github.com/the-bea-project/bea/releases"
+
+/// The binary on the latest release, under the name the compiler's CI
+/// downloads it by.
+pub const linux_binary = "https://github.com/the-bea-project/bea/releases/latest/download/bea-linux-amd64"
+
+/// Bea's topic on the Gleam Discord: Bea talk happens with the Gleam
+/// community.
+pub const gleam_discord_topic = "https://discord.com/channels/768594524158427167/1562323564449763428"
+
+// Bea's own Discord server. Not linked for now: conversation lives on the
+// Gleam Discord (above).
+// pub const discord = "https://discord.gg/wpzXrRF8D"
+
+pub const gleam = "https://gleam.run"
+
+pub const lustre = "https://hexdocs.pm/lustre/"
+
+pub const gleepack = "https://github.com/yoshi-monster/gleepack"
+
+pub const exercism = "https://exercism.org/tracks/gleam"
