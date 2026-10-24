@@ -39,7 +39,7 @@ jobs:
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fsSL -o "$HOME/.local/bin/bea" \
-            https://github.com/the-bea-project/bea/releases/latest/download/bea-linux-amd64
+            https://github.com/the-bea-project/bea/releases/latest/download/bea-linux-amd64.elf
           chmod +x "$HOME/.local/bin/bea"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
